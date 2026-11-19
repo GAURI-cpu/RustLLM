@@ -5,9 +5,11 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.104"
-axum = "0.8.9"
+axum = { version = "0.8.9", features = ["multipart"] }
 candle-core = "0.11.1"
+candle-nn = "0.11.1"
 candle-transformers = "0.11.1"
+hound = "3.5.1"
 image = "0.25.10"
 ocrs = "0.14.0"
 rten = "0.28.0"

@@ -5,12 +5,14 @@
 //!   cargo run --release -- --model models/other-model.gguf
 //!   cargo run --release -- --context 8192      allow longer conversations
 //!   cargo run --release -- --serve --ocr-models models/ocr   where the photo-reading models are
+//!   cargo run --release -- --serve --whisper-model models/whisper   where the speech-to-text model is
 
 mod chat;
 mod engine;
 mod ocr;
 mod sampler;
 mod server;
+mod voice;
 
 use std::io::Write;
 use std::path::Path;
@@ -21,6 +23,7 @@ use chat::{Message, Role, build_prompt_within};
 use engine::Engine;
 use ocr::Ocr;
 use sampler::SamplingOptions;
+use voice::Voice;
 
 fn main() -> Result<()> {
     // Defaults, which can be changed from the command line
@@ -30,6 +33,7 @@ fn main() -> Result<()> {
     let mut port: u16 = 8080;
     let mut context: usize = 4096;
     let mut ocr_models = "models/ocr".to_string();
+    let mut whisper_model = "models/whisper".to_string();
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -56,6 +60,10 @@ fn main() -> Result<()> {
                 ocr_models = args[i + 1].clone();
                 i += 1;
             }
+            "--whisper-model" if i + 1 < args.len() => {
+                whisper_model = args[i + 1].clone();
+                i += 1;
+            }
             other => anyhow::bail!("unknown option: {other}"),
         }
         i += 1;
@@ -67,9 +75,10 @@ fn main() -> Result<()> {
 
     if serve {
         let ocr = load_ocr(Path::new(&ocr_models));
+        let voice = load_voice(Path::new(&whisper_model));
         // Start the async runtime and run the server until Ctrl+C
         let runtime = tokio::runtime::Runtime::new()?;
-        return runtime.block_on(server::serve(engine, model_path, port, ocr));
+        return runtime.block_on(server::serve(engine, model_path, port, ocr, voice));
     }
 
     let opts = SamplingOptions::default();
@@ -143,6 +152,25 @@ fn load_ocr(dir: &Path) -> Option<Ocr> {
         }
         Err(e) => {
             println!("Photo reading: off ({e:#})");
+            None
+        }
+    }
+}
+
+/// Voice input is optional too: without the Whisper files the server runs without it.
+fn load_voice(dir: &Path) -> Option<Voice> {
+    let shown = dir.display();
+    if !Voice::files_present(dir) {
+        println!("Voice input: off (put config.json, tokenizer.json and model.safetensors from Whisper in {shown})");
+        return None;
+    }
+    match Voice::load(dir) {
+        Ok(voice) => {
+            println!("Voice input: on ({shown})");
+            Some(voice)
+        }
+        Err(e) => {
+            println!("Voice input: off ({e:#})");
             None
         }
     }

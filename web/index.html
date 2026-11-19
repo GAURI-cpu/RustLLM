@@ -115,7 +115,9 @@
   .msg .meta { font: 12px var(--mono); color: var(--muted); margin-top: 6px; }
   .msg.error .body { color: #b3261e; }
   .meta .copy-reply { background: none; border: 0; color: var(--muted); font: inherit; cursor: pointer; padding: 0; text-decoration: underline; }
-  .meta .stats:not(:empty) + .copy-reply { margin-left: 10px; }
+  /* stats + copy / listen / regenerate: wraps neatly on narrow screens */
+  .msg .meta { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 10px; row-gap: 2px; }
+  .meta .stats:empty { display: none; }
 
   /* Formatted (Markdown) assistant replies */
   .md > :first-child { margin-top: 0; }
@@ -174,7 +176,7 @@
   button.send:disabled { opacity: 0.5; cursor: default; }
   button.send.stop { background: var(--ink); color: var(--bg); }
   .hint { max-width: 760px; margin: 0 auto; padding: 0 20px 12px; display: flex; justify-content: space-between; gap: 12px; font: 12px var(--mono); color: var(--muted); }
-  @media (max-width: 520px) { .hint span { display: none; } .hint { justify-content: flex-end; } }
+  @media (max-width: 520px) { .hint .hint-keys { display: none; } .hint { justify-content: flex-end; } }
   .hint button { background: none; border: 0; color: var(--muted); font: inherit; cursor: pointer; padding: 0; text-decoration: underline; }
 
   /* Chat history sidebar */
@@ -235,12 +237,11 @@
 
   /* Edit / regenerate / retry */
   .msg-actions { margin-top: 4px; line-height: 1.4; }
-  .edit-msg, .regen-btn, .retry-btn {
+  .edit-msg, .regen-btn, .retry-btn, .listen-btn {
     background: none; border: 0; padding: 0; cursor: pointer;
     font: 12px var(--mono); color: var(--muted); text-decoration: underline;
   }
-  .edit-msg:hover, .regen-btn:hover, .retry-btn:hover { color: var(--accent); }
-  .meta .copy-reply + .regen-btn, .meta .stats:not(:empty) + .retry-btn { margin-left: 10px; }
+  .edit-msg:hover, .regen-btn:hover, .retry-btn:hover, .listen-btn:hover { color: var(--accent); }
   .msg.user .msg-actions { visibility: hidden; }
   .msg.user:hover .msg-actions, .msg.user:focus-within .msg-actions { visibility: visible; }
   @media (hover: none) { .msg.user .msg-actions { visibility: visible; } }
@@ -286,6 +287,29 @@
     background: var(--paper); border: 1px solid var(--line); border-radius: 10px;
   }
   @media (max-width: 520px) { .attach { padding: 8px 14px 0; } }
+
+  /* Voice: microphone button and the hint row (language picker + status) */
+  .mic-btn.recording, .mic-btn.recording:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+  @media (prefers-reduced-motion: no-preference) {
+    .mic-btn.recording { animation: mic-pulse 1.4s ease-out infinite; }
+  }
+  @keyframes mic-pulse {
+    0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent); }
+    100% { box-shadow: 0 0 0 10px transparent; }
+  }
+  .mic-btn.working { opacity: 0.6; cursor: progress; }
+  .hint { align-items: center; white-space: nowrap; }
+  .hint .hint-keys { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .hint.has-status .hint-keys { display: none; }
+  .hint > button { flex-shrink: 0; }
+  .voice-row { display: flex; align-items: center; gap: 6px; min-width: 0; margin-right: auto; }
+  .voice-row[hidden] { display: none; }
+  .voice-row select {
+    font: inherit; color: var(--ink); background: var(--paper); border: 1px solid var(--line);
+    border-radius: 6px; padding: 1px 2px; max-width: 92px;
+  }
+  .voice-status { color: var(--accent); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  @media (max-width: 520px) { form { gap: 8px; } }
   .edit-box { display: flex; flex-direction: column; gap: 8px; }
   textarea.edit-input { flex: none; width: 100%; min-height: 80px; max-height: 320px; resize: vertical; }
   .edit-buttons { display: flex; justify-content: flex-end; gap: 8px; }
@@ -363,11 +387,23 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/></svg>
       </button>
       <input type="file" id="photo-input" accept="image/*" hidden>
+      <button class="photo-btn mic-btn" id="mic-btn" type="button" aria-label="Speak instead of typing" aria-pressed="false" title="Speak" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v1a7 7 0 0 0 14 0v-1M12 18v4M8 22h8"/></svg>
+      </button>
       <textarea id="input" rows="1" placeholder="Ask anything…" autofocus></textarea>
       <button class="send" id="send" type="submit">Send</button>
     </form>
     <div class="hint">
-      <span>Enter to send · Shift+Enter for a new line</span>
+      <span class="hint-keys">Enter to send · Shift+Enter for a new line</span>
+      <div class="voice-row" id="voice-row" hidden>
+        <label for="voice-lang">voice</label>
+        <select id="voice-lang" aria-label="Language you speak">
+          <option value="auto">auto</option>
+          <option value="en">English</option>
+          <option value="hi">हिन्दी</option>
+        </select>
+        <span class="voice-status" id="voice-status" aria-live="polite"></span>
+      </div>
       <button id="reset" type="button">New chat</button>
     </div>
   </footer>
@@ -448,6 +484,9 @@ fetch('/v1/models')
     document.getElementById('dot').classList.add('on');
     ocrOn = d.kinsin?.ocr === true;
     photoBtn.hidden = !ocrOn;
+    voiceOn = d.kinsin?.voice === true;
+    micBtn.hidden = !voiceOn;
+    voiceRow.hidden = !voiceOn;
   })
   .catch(() => { document.getElementById('status').textContent = 'server offline'; });
 
@@ -481,6 +520,7 @@ function focusInput() { if (!isTouch.matches) input.focus(); }
 // Draw every message of the open chat. data-index = position in chat.messages.
 function renderThread() {
   const chat = current;
+  stopSpeaking();
   thread.querySelectorAll('.msg').forEach(m => m.remove());
   empty.style.display = chat.messages.length ? 'none' : '';
   chat.messages.forEach((m, i) => {
@@ -870,6 +910,7 @@ function addReplyCopy(el, raw) {
   el.rawReply = raw;
   const m = metaLine(el);
   if (!m.querySelector('.copy-reply')) m.insertAdjacentHTML('beforeend', '<button type="button" class="copy-reply">copy</button>');
+  if (canSpeak && !m.querySelector('.listen-btn')) m.insertAdjacentHTML('beforeend', '<button type="button" class="listen-btn">listen</button>');
 }
 
 // --- Copy buttons (one delegated listener for every message) ---
@@ -1257,6 +1298,215 @@ appEl.addEventListener('drop', e => {
   appEl.classList.remove('dragging');
   const file = [...e.dataTransfer.files].find(f => f.type.startsWith('image/')) || e.dataTransfer.files[0];
   if (file) addPhoto(file);
+});
+
+// --- Voice input: record in the browser, Whisper on the server turns it into text ---
+const micBtn = document.getElementById('mic-btn');
+const voiceRow = document.getElementById('voice-row');
+const voiceLang = document.getElementById('voice-lang');
+const voiceStatus = document.getElementById('voice-status');
+const hintRow = document.querySelector('.hint');
+const MAX_RECORD_SECONDS = 60;
+const MIN_RECORD_SECONDS = 0.6;
+let voiceOn = false;       // the server has a Whisper model
+let recording = null;      // { stream, ctx, source, node, chunks, rate, started, timer, autoStop }
+let transcribing = false;
+let statusTimer = null;
+
+// Status text in the hint row. Errors and notes fade after a while; progress stays until replaced.
+function setVoiceStatus(text, { sticky = false } = {}) {
+  clearTimeout(statusTimer);
+  voiceStatus.textContent = text;
+  hintRow.classList.toggle('has-status', !!text);
+  if (text && !sticky) statusTimer = setTimeout(() => setVoiceStatus(''), 6000);
+}
+
+try {
+  const saved = localStorage.getItem('kinsin-voice-lang');
+  if (['auto', 'en', 'hi'].includes(saved)) voiceLang.value = saved;
+} catch { /* storage blocked: start with "auto" */ }
+voiceLang.addEventListener('change', () => {
+  try { localStorage.setItem('kinsin-voice-lang', voiceLang.value); } catch { /* not remembered, still used */ }
+});
+
+micBtn.addEventListener('click', () => {
+  if (transcribing) return;
+  if (recording) stopRecording(); else startRecording();
+});
+
+async function startRecording() {
+  if (!navigator.mediaDevices?.getUserMedia) { setVoiceStatus('voice needs localhost or https'); return; }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+  } catch (err) {
+    const blocked = err.name === 'NotAllowedError' || err.name === 'SecurityError';
+    setVoiceStatus(blocked ? 'microphone blocked: allow it in the browser'
+      : err.name === 'NotFoundError' ? 'no microphone found' : 'could not start the microphone');
+    return;
+  }
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  if (ctx.state === 'suspended') await ctx.resume().catch(() => {});
+  const source = ctx.createMediaStreamSource(stream);
+  const node = ctx.createScriptProcessor(4096, 1, 1);
+  const chunks = [];
+  node.onaudioprocess = e => chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+  source.connect(node);
+  node.connect(ctx.destination);   // needed for the processor to run; it outputs silence
+
+  recording = { stream, ctx, source, node, chunks, rate: ctx.sampleRate, started: performance.now() };
+  micBtn.classList.add('recording');
+  micBtn.setAttribute('aria-pressed', 'true');
+  micBtn.setAttribute('aria-label', 'Stop recording');
+  const tick = () => {
+    const s = Math.floor((performance.now() - recording.started) / 1000);
+    setVoiceStatus(`listening… ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')} · tap mic to stop`, { sticky: true });
+  };
+  tick();
+  recording.timer = setInterval(tick, 250);
+  recording.autoStop = setTimeout(stopRecording, MAX_RECORD_SECONDS * 1000);
+}
+
+async function stopRecording() {
+  const r = recording;
+  if (!r) return;
+  recording = null;
+  clearInterval(r.timer);
+  clearTimeout(r.autoStop);
+  r.node.onaudioprocess = null;
+  r.source.disconnect();
+  r.node.disconnect();
+  r.stream.getTracks().forEach(t => t.stop());
+  r.ctx.close().catch(() => {});
+  micBtn.classList.remove('recording');
+  micBtn.setAttribute('aria-pressed', 'false');
+  micBtn.setAttribute('aria-label', 'Speak instead of typing');
+
+  const length = r.chunks.reduce((n, c) => n + c.length, 0);
+  if (length / r.rate < MIN_RECORD_SECONDS) { setVoiceStatus('too short: hold on a bit longer'); return; }
+  const all = new Float32Array(length);
+  let offset = 0;
+  for (const c of r.chunks) { all.set(c, offset); offset += c.length; }
+  const wav = encodeWav(downsample(all, r.rate, 16000), 16000);
+
+  transcribing = true;
+  micBtn.classList.add('working');
+  setVoiceStatus('turning speech into text…', { sticky: true });
+  try {
+    const form = new FormData();
+    form.append('file', new Blob([wav], { type: 'audio/wav' }), 'speech.wav');
+    form.append('language', voiceLang.value);
+    const res = await fetch('/v1/audio/transcriptions', { method: 'POST', body: form });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error?.message || res.statusText || 'speech to text failed');
+    const text = typeof data.text === 'string' ? data.text.trim() : '';
+    if (!text) { setVoiceStatus("didn't catch that, try again"); return; }
+    const before = input.value.replace(/\s+$/, '');
+    input.value = before ? before + ' ' + text : text;
+    autosize();
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+    setVoiceStatus('');
+  } catch (err) {
+    setVoiceStatus(err.message || 'speech to text failed');
+  } finally {
+    transcribing = false;
+    micBtn.classList.remove('working');
+  }
+}
+
+// 16 kHz for Whisper: average the samples that fall into each output step
+function downsample(samples, from, to) {
+  if (from === to) return samples;
+  const ratio = from / to;
+  const out = new Float32Array(Math.floor(samples.length / ratio));
+  for (let i = 0; i < out.length; i++) {
+    const start = Math.floor(i * ratio);
+    const end = Math.min(samples.length, Math.floor((i + 1) * ratio));
+    let sum = 0;
+    for (let j = start; j < end; j++) sum += samples[j];
+    out[i] = end > start ? sum / (end - start) : samples[start];
+  }
+  return out;
+}
+
+// A 16-bit mono WAV file: 44-byte header + the samples
+function encodeWav(samples, rate) {
+  const buffer = new ArrayBuffer(44 + samples.length * 2);
+  const v = new DataView(buffer);
+  const text = (at, s) => { for (let i = 0; i < s.length; i++) v.setUint8(at + i, s.charCodeAt(i)); };
+  text(0, 'RIFF'); v.setUint32(4, 36 + samples.length * 2, true); text(8, 'WAVE');
+  text(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  text(36, 'data'); v.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    v.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return buffer;
+}
+
+// --- Read answers aloud (the browser's own text-to-speech) ---
+const canSpeak = 'speechSynthesis' in window;
+let speakingBtn = null;
+let speechRun = 0;          // which reading is current; older ones' events are ignored
+if (canSpeak) speechSynthesis.getVoices();   // some browsers load the voice list lazily
+
+function stopSpeaking() {
+  if (!canSpeak || !speakingBtn) return;
+  speechRun++;
+  speechSynthesis.cancel();
+  speakingBtn.textContent = 'listen';
+  speakingBtn = null;
+}
+
+// What to read: the rendered answer, with code blocks replaced by "(code block)"
+function spokenText(body) {
+  const copy = body.cloneNode(true);
+  copy.querySelectorAll('.codeblock').forEach(c => c.replaceWith(' (code block). '));
+  copy.querySelectorAll('p, li, h3, h4, blockquote, tr, br').forEach(el => el.after('\n'));
+  return copy.textContent.replace(/[ \t]+/g, ' ').replace(/\s*\n\s*/g, '\n').trim();
+}
+
+function pickVoice(lang) {
+  const voices = speechSynthesis.getVoices();
+  const norm = l => (l || '').replace('_', '-').toLowerCase();
+  return voices.find(v => norm(v.lang) === lang.toLowerCase())
+    || voices.find(v => norm(v.lang).startsWith(lang.slice(0, 2).toLowerCase())) || null;
+}
+
+function speak(btn) {
+  const body = btn.closest('.msg')?.querySelector('.body');
+  if (!body) return;
+  if (speakingBtn === btn) { stopSpeaking(); return; }   // second click = stop
+  stopSpeaking();                                       // only one at a time
+  const text = spokenText(body);
+  if (!text) return;
+  const lang = /[\u0900-\u097F]/.test(text) ? 'hi-IN' : 'en-IN';
+  const voice = pickVoice(lang);
+  // Read in sentence-sized pieces: some browsers stop long utterances part-way
+  const parts = (text.match(/[^.!?।\n]+[.!?।]*\s*|\n+/g) || [text])
+    .reduce((acc, s) => {
+      if (acc.length && (acc[acc.length - 1] + s).length < 220) acc[acc.length - 1] += s; else acc.push(s);
+      return acc;
+    }, [])
+    .map(s => s.trim()).filter(Boolean);
+  const run = ++speechRun;
+  speakingBtn = btn;
+  btn.textContent = 'stop';
+  parts.forEach((part, i) => {
+    const u = new SpeechSynthesisUtterance(part);
+    u.lang = lang;
+    if (voice) u.voice = voice;
+    const done = () => { if (run === speechRun && speakingBtn === btn) { btn.textContent = 'listen'; speakingBtn = null; } };
+    if (i === parts.length - 1) u.onend = done;
+    u.onerror = done;
+    speechSynthesis.speak(u);
+  });
+}
+thread.addEventListener('click', e => {
+  const btn = e.target.closest('.listen-btn');
+  if (btn && canSpeak) speak(btn);
 });
 
 // --- Input handling ---

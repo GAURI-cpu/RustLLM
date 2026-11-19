@@ -5,6 +5,7 @@
 //!   GET  /v1/models             -> which model is loaded
 //!   POST /v1/chat/completions   -> a reply, streamed or all at once
 //!   POST /v1/ocr                -> the text in a photo (body = the image bytes)
+//!   POST /v1/audio/transcriptions -> speech to text (multipart form: file=WAV, language)
 //!
 //! The model can only work on one request at a time on a CPU, so requests
 //! wait in a queue and a single worker thread answers them in order.
@@ -15,6 +16,7 @@ use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use axum::extract::DefaultBodyLimit;
+use axum::extract::Multipart;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
@@ -31,6 +33,7 @@ use crate::chat::{Message, Role, build_prompt_within};
 use crate::engine::{Engine, Stats};
 use crate::ocr::Ocr;
 use crate::sampler::SamplingOptions;
+use crate::voice::{self, Voice};
 
 // ---------- Limits that keep the server healthy ----------
 
@@ -40,6 +43,8 @@ const MAX_PENDING: usize = 8;
 const MAX_BODY_BYTES: usize = 64 * 1024;
 /// Largest photo accepted by /v1/ocr, in bytes.
 const MAX_PHOTO_BYTES: usize = 12 * 1024 * 1024;
+/// Largest recording accepted by /v1/audio/transcriptions, in bytes.
+const MAX_AUDIO_BYTES: usize = 16 * 1024 * 1024;
 /// Most messages in one conversation.
 const MAX_MESSAGES: usize = 200;
 /// Longest single message, in characters.
@@ -98,6 +103,8 @@ struct AppState {
     ocr: Option<Arc<Ocr>>,
     /// One photo at a time: OCR uses a lot of CPU.
     ocr_slot: Arc<tokio::sync::Semaphore>,
+    /// Speech to text; None when the Whisper model is missing. The Mutex = one recording at a time.
+    voice: Option<Arc<std::sync::Mutex<Voice>>>,
 }
 
 /// The worker: owns the engine and answers jobs one by one, forever.
@@ -136,7 +143,13 @@ fn answer(engine: &mut Engine, job: Job) {
 
 // ---------- Starting the server ----------
 
-pub async fn serve(engine: Engine, model_name: String, port: u16, ocr: Option<Ocr>) -> anyhow::Result<()> {
+pub async fn serve(
+    engine: Engine,
+    model_name: String,
+    port: u16,
+    ocr: Option<Ocr>,
+    voice: Option<Voice>,
+) -> anyhow::Result<()> {
     let (queue, jobs) = mpsc::channel::<Job>();
     let pending = Arc::new(AtomicUsize::new(0));
     let worker_pending = pending.clone();
@@ -148,6 +161,7 @@ pub async fn serve(engine: Engine, model_name: String, port: u16, ocr: Option<Oc
         model_name,
         ocr: ocr.map(Arc::new),
         ocr_slot: Arc::new(tokio::sync::Semaphore::new(1)),
+        voice: voice.map(|v| Arc::new(std::sync::Mutex::new(v))),
     };
     let app = app(state);
 
@@ -166,6 +180,10 @@ fn app(state: AppState) -> Router {
         .route("/v1/chat/completions", post(chat_completions))
         // Photos are bigger than chat messages: only this route gets a larger limit
         .route("/v1/ocr", post(read_photo).layer(DefaultBodyLimit::max(MAX_PHOTO_BYTES)))
+        .route(
+            "/v1/audio/transcriptions",
+            post(transcribe_audio).layer(DefaultBodyLimit::max(MAX_AUDIO_BYTES)),
+        )
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES)) // reject huge requests early
         .layer(CorsLayer::permissive()) // allow a website on another port to call us
         .with_state(state)
@@ -177,8 +195,66 @@ async fn list_models(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(json!({
         "object": "list",
         "data": [{ "id": state.model_name, "object": "model", "owned_by": "rustllm" }],
-        "kinsin": { "ocr": state.ocr.is_some() }
+        "kinsin": { "ocr": state.ocr.is_some(), "voice": state.voice.is_some() }
     }))
+}
+
+// ---------- POST /v1/audio/transcriptions ----------
+
+/// Speech to text, shaped like OpenAI's endpoint: a multipart form with
+/// "file" (a WAV recording) and optional "language" ("auto" or empty = detect).
+async fn transcribe_audio(State(state): State<AppState>, mut form: Multipart) -> Response {
+    let Some(voice) = state.voice.clone() else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "voice input is not set up on this server (Whisper model missing)");
+    };
+
+    let mut wav = None;
+    let mut language = String::new();
+    loop {
+        match form.next_field().await {
+            Ok(Some(field)) => match field.name() {
+                Some("file") => match field.bytes().await {
+                    Ok(bytes) => wav = Some(bytes),
+                    Err(e) => return error(StatusCode::BAD_REQUEST, &format!("could not read the recording: {e}")),
+                },
+                Some("language") => language = field.text().await.unwrap_or_default().trim().to_lowercase(),
+                _ => {} // ignore other fields (OpenAI clients send "model", etc.)
+            },
+            Ok(None) => break,
+            Err(e) => return error(StatusCode::BAD_REQUEST, &format!("could not read the form: {e}")),
+        }
+    }
+    let Some(wav) = wav.filter(|w| !w.is_empty()) else {
+        return error(StatusCode::BAD_REQUEST, "send the recording in a form field named \"file\"");
+    };
+    let language = match language.as_str() {
+        "" | "auto" => None,
+        code if voice::LANGUAGES.contains(&code) => Some(code.to_string()),
+        code => return error(StatusCode::BAD_REQUEST, &format!("unknown language '{code}'")),
+    };
+
+    let started = Instant::now();
+    // Whisper is heavy CPU work: run it on a blocking thread. The Mutex makes recordings take turns.
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<(String, String, f64)> {
+        let samples = voice::wav_to_samples(&wav)?;
+        let duration = samples.len() as f64 / 16_000.0;
+        let mut voice = voice.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (text, language) = voice.transcribe(&samples, language.as_deref())?;
+        Ok((text, language, duration))
+    })
+    .await;
+
+    match result {
+        Ok(Ok((text, language, duration))) => Json(json!({
+            "text": text,
+            "language": language,
+            "duration": (duration * 100.0).round() / 100.0,
+            "ms": started.elapsed().as_millis() as u64
+        }))
+        .into_response(),
+        Ok(Err(e)) => error(StatusCode::BAD_REQUEST, &e.to_string()),
+        Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "speech to text crashed"),
+    }
 }
 
 // ---------- POST /v1/ocr ----------
@@ -353,6 +429,7 @@ mod tests {
             model_name: "test".to_string(),
             ocr: None,
             ocr_slot: Arc::new(tokio::sync::Semaphore::new(1)),
+            voice: None,
         }
     }
 
@@ -409,6 +486,7 @@ mod tests {
     async fn models_say_whether_photo_reading_is_on() {
         let Json(body) = list_models(State(state_with_pending(0))).await;
         assert_eq!(body["kinsin"]["ocr"], false);
+        assert_eq!(body["kinsin"]["voice"], false);
     }
 
     /// Send a POST with a body of `size` bytes through the real router; return the status.
@@ -429,5 +507,26 @@ mod tests {
         assert_eq!(post_size("/v1/ocr", MAX_PHOTO_BYTES + 1).await, StatusCode::PAYLOAD_TOO_LARGE);
         // Chat requests still stop at 64 KB
         assert_eq!(post_size("/v1/chat/completions", MAX_BODY_BYTES + 1).await, StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn voice_without_whisper_model_answers_503() {
+        use tower::ServiceExt;
+        let boundary = "XyZ";
+        let body = format!(
+            "--{boundary}
+Content-Disposition: form-data; name=\"file\"; filename=\"speech.wav\"
+Content-Type: audio/wav
+
+RIFF....
+--{boundary}--
+"
+        );
+        let request = axum::http::Request::post("/v1/audio/transcriptions")
+            .header("content-type", format!("multipart/form-data; boundary={boundary}"))
+            .body(axum::body::Body::from(body))
+            .unwrap();
+        let response = app(state_with_pending(0)).oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }
