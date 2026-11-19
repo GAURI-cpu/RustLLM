@@ -1,41 +1,71 @@
+use std::io::Write;
+use std::time::Instant;
+
 use anyhow::Result;
 use candle_core::quantized::gguf_file;
+use candle_core::{Device, Tensor};
+use candle_transformers::models::quantized_qwen2::ModelWeights;
+use tokenizers::Tokenizer;
 
 fn main() -> Result<()> {
-    let path = "models/qwen2.5-0.5b-instruct-q4_k_m.gguf";
-
-    // TODO 1 + 2: open the file and read its header
-    let mut file = std::fs::File::open(path)?;
+    // Load model + tokenizer (same as Step 4)
+    println!("AVX enabled: {}", candle_core::utils::with_avx());
+    let device = Device::Cpu;
+    let mut file = std::fs::File::open("models/qwen2.5-0.5b-instruct-q4_k_m.gguf")?;
     let content = gguf_file::Content::read(&mut file)?;
+    let mut model = ModelWeights::from_gguf(content, &mut file, &device)?;
+    let tokenizer = Tokenizer::from_file("models/tokenizer.json").map_err(anyhow::Error::msg)?;
 
-    // TODO 3: what kind of model is this?
-    let arch = content.metadata.get("general.architecture").unwrap().to_string()?;
-    println!("Architecture:   {}", arch);
+    // Tokens that mean "I'm done"
+    let stop_tokens: Vec<u32> = ["<|endoftext|>", "<|im_end|>"]
+        .iter()
+        .filter_map(|t| tokenizer.token_to_id(t))
+        .collect();
 
-    // TODO 4: how big is it?
-    let layers = content.metadata.get("qwen2.block_count").unwrap().to_u32()?;
-    let context = content.metadata.get("qwen2.context_length").unwrap().to_u32()?;
-    println!("Layers:         {}", layers);
-    println!("Context length: {}", context);
+    // PREFILL: run the whole prompt once
+    let prompt = "The capital of France is";
+    let mut tokens = tokenizer.encode(prompt, false).map_err(anyhow::Error::msg)?.get_ids().to_vec();
+    print!("{}", prompt);
 
-    // TODO 5: how many weight blocks?
-    println!("Tensors:        {}", content.tensor_infos.len());
+    let input = Tensor::new(tokens.as_slice(), &device)?.unsqueeze(0)?;
+    let logits: Vec<f32> = model.forward(&input, 0)?.squeeze(0)?.to_vec1()?;
+    let mut next = argmax(&logits);
 
-    // BONUS: list tensor names in alphabetical order
-    let mut names: Vec<&String> = content.tensor_infos.keys().collect();
-    names.sort();
+    // DECODE: one new token at a time
+    let start = Instant::now();
+    let mut generated = 0;
+    for _ in 0..50 {
+        if stop_tokens.contains(&next) {
+            break;
+        }
+        tokens.push(next);
+        generated += 1;
 
-    println!("\nLayer 0 contains:");
-    for name in names.iter().filter(|n| n.starts_with("blk.0.")) {
-        let info = &content.tensor_infos[*name];
-        println!("  {:<28} {:<14} {:?}", name, format!("{:?}", info.shape.dims()), info.ggml_dtype);
+        // show the new word immediately
+        let word = tokenizer.decode(&[next], false).map_err(anyhow::Error::msg)?;
+        print!("{}", word);
+        std::io::stdout().flush()?;
+
+        // feed ONLY the new token; the KV cache remembers the rest
+        let input = Tensor::new(&[next], &device)?.unsqueeze(0)?;
+        let position = tokens.len() - 1;
+        let logits: Vec<f32> = model.forward(&input, position)?.squeeze(0)?.to_vec1()?;
+        next = argmax(&logits);
     }
 
-    println!("\nOutside the layers:");
-    for name in names.iter().filter(|n| !n.starts_with("blk.")) {
-        let info = &content.tensor_infos[*name];
-        println!("  {:<28} {:<14} {:?}", name, format!("{:?}", info.shape.dims()), info.ggml_dtype);
-    }
-
+    
+    let secs = start.elapsed().as_secs_f64();
+    println!("\n\n[{} tokens in {:.2}s = {:.1} tokens/sec]", generated, secs, generated as f64 / secs);
     Ok(())
+}
+
+// Return the position of the highest score = the most likely token id
+fn argmax(scores: &[f32]) -> u32 {
+    let mut best = 0;
+    for i in 1..scores.len() {
+        if scores[i] > scores[best] {
+            best = i;
+        }
+    }
+    best as u32
 }
