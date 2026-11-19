@@ -3,24 +3,24 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>rustllm</title>
+<title>kinSin</title>
 <style>
   :root {
-    --bg: #f4efe6;
-    --paper: #fbf8f2;
-    --ink: #1f1b16;
-    --muted: #7a7064;
-    --line: #e4dccf;
-    --accent: #c2552d;       /* rust */
-    --accent-soft: #f3e1d6;
-    --user: #2a2620;
+    --bg: #f9ecec;
+    --paper: #fff8f8;
+    --ink: #2a1a1e;
+    --muted: #93767c;
+    --line: #f0d9da;
+    --accent: #8a1c3b;       /* wine */
+    --accent-soft: #f3d6de;
+    --user: #2a1a1e;
     --mono: ui-monospace, "JetBrains Mono", "Cascadia Code", Consolas, monospace;
     --sans: ui-sans-serif, system-ui, "Segoe UI", Inter, sans-serif;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #171512; --paper: #1f1c18; --ink: #ede6da; --muted: #9a8f80;
-      --line: #2f2a24; --accent: #e07a4f; --accent-soft: #3a2a21; --user: #ede6da;
+      --bg: #1c1215; --paper: #26191d; --ink: #f3e6e8; --muted: #a88c92;
+      --line: #36242a; --accent: #c94a6e; --accent-soft: #3d2029; --user: #f3e6e8;
     }
   }
   * { box-sizing: border-box; }
@@ -90,7 +90,7 @@
 </head>
 <body>
   <header>
-    <div class="brand">rust<span>llm</span></div>
+    <div class="brand">kin<span>Sin</span></div>
     <div class="status"><span class="dot" id="dot"></span><span id="status">connecting…</span></div>
   </header>
 
@@ -145,7 +145,7 @@ function addMessage(role, text) {
   empty.style.display = 'none';
   const el = document.createElement('div');
   el.className = 'msg ' + role;
-  el.innerHTML = `<div class="who">${role === 'user' ? 'you' : 'rustllm'}</div><div class="body"></div>`;
+  el.innerHTML = `<div class="who">${role === 'user' ? 'you' : 'kinSin'}</div><div class="body"></div>`;
   el.querySelector('.body').textContent = text;
   thread.appendChild(el);
   scrollDown();
