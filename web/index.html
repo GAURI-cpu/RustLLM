@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>kinSin</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%238a1c3b'/%3E%3Cpath d='M16 14v36M16 36l13-12' fill='none' stroke='%23fff8f8' stroke-width='5.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M21 40C23 35.2 24.8 33 26.8 33S30.6 35.2 32.6 40 36.4 47 38.4 47 42.2 44.8 44.2 40 48 33 50 33' fill='none' stroke='%23f3d6de' stroke-width='5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <script>
   // Apply a saved light/dark choice before the first paint (no flash). No choice = follow the system.
   try {
@@ -23,6 +24,8 @@
     --user: #2a1a1e;
     --code-bg: #2a1a1e;
     --code-ink: #f6e9eb;
+    --logo-k: #fff8f8;
+    --logo-wave: #f3d6de;
     --mono: ui-monospace, "JetBrains Mono", "Cascadia Code", Consolas, monospace;
     --sans: ui-sans-serif, system-ui, "Segoe UI", Inter, sans-serif;
     color-scheme: light;
@@ -33,6 +36,7 @@
       --bg: #1c1215; --paper: #26191d; --ink: #f3e6e8; --muted: #a88c92;
       --line: #36242a; --accent: #c94a6e; --accent-soft: #3d2029; --user: #f3e6e8;
       --code-bg: #140c0f; --code-ink: #f3e6e8;
+      --logo-k: #fff3f5; --logo-wave: #2a1a1e;
       color-scheme: dark;
     }
   }
@@ -41,21 +45,27 @@
     --bg: #1c1215; --paper: #26191d; --ink: #f3e6e8; --muted: #a88c92;
     --line: #36242a; --accent: #c94a6e; --accent-soft: #3d2029; --user: #f3e6e8;
     --code-bg: #140c0f; --code-ink: #f3e6e8;
+    --logo-k: #fff3f5; --logo-wave: #2a1a1e;
     color-scheme: dark;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
   body {
     background: var(--bg); color: var(--ink); font: 16px/1.6 var(--sans);
-    display: flex; flex-direction: column;
+    display: flex;
   }
+  /* The chat area (header, messages, input) to the right of the sidebar */
+  .app { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 
   header {
     display: flex; align-items: center; justify-content: space-between; gap: 12px;
     padding: 14px 20px; border-bottom: 1px solid var(--line);
   }
   .brand { font: 600 18px var(--mono); letter-spacing: -0.02em; }
-  .brand span { color: var(--accent); }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .brand-icon { width: 28px; height: 28px; flex-shrink: 0; }
+  .brand-name { color: var(--ink); }
+  .brand-name span { color: var(--accent); }
   .status { display: flex; align-items: center; gap: 8px; font: 12px var(--mono); color: var(--muted); }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
   .dot.on { background: #4e9a62; }
@@ -63,13 +73,14 @@
   .dot { flex-shrink: 0; }
   #status { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .header-right { display: flex; align-items: center; gap: 14px; min-width: 0; }
-  .theme-toggle {
+  .theme-toggle, .menu-btn {
     flex-shrink: 0; width: 34px; height: 34px; padding: 0; border-radius: 10px; cursor: pointer;
     display: flex; align-items: center; justify-content: center;
     background: var(--paper); border: 1px solid var(--line); color: var(--ink);
   }
-  .theme-toggle:hover { border-color: var(--accent); color: var(--accent); }
-  .theme-toggle svg { width: 17px; height: 17px; }
+  .theme-toggle:hover, .menu-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .theme-toggle svg, .menu-btn svg { width: 17px; height: 17px; }
+  .header-left { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
   /* Moon in light mode, sun in dark mode (follows the same rules as the colours) */
   .icon-sun { display: none; }
   :root[data-theme="dark"] .icon-sun { display: block; }
@@ -164,11 +175,90 @@
   .hint { max-width: 760px; margin: 0 auto; padding: 0 20px 12px; display: flex; justify-content: space-between; gap: 12px; font: 12px var(--mono); color: var(--muted); }
   @media (max-width: 520px) { .hint span { display: none; } .hint { justify-content: flex-end; } }
   .hint button { background: none; border: 0; color: var(--muted); font: inherit; cursor: pointer; padding: 0; text-decoration: underline; }
+
+  /* Chat history sidebar */
+  .sidebar {
+    width: 264px; flex-shrink: 0; display: flex; flex-direction: column;
+    background: var(--paper); border-right: 1px solid var(--line);
+  }
+  .new-chat {
+    margin: 14px 12px 6px; display: flex; align-items: center; gap: 8px; padding: 9px 12px;
+    background: none; border: 1px solid var(--line); border-radius: 12px; color: var(--ink);
+    font: 600 14px var(--sans); cursor: pointer;
+  }
+  .new-chat:hover { border-color: var(--accent); color: var(--accent); }
+  .new-chat svg { width: 16px; height: 16px; flex-shrink: 0; }
+  .chat-list { flex: 1; overflow-y: auto; padding: 0 8px 12px; }
+  .group-label {
+    padding: 16px 10px 6px; font: 600 10.5px var(--mono); letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--muted);
+  }
+  .chat-item { display: flex; align-items: center; border-radius: 10px; margin-bottom: 1px; }
+  .chat-item:hover { background: var(--bg); }
+  .chat-item.active { background: var(--accent-soft); }
+  .chat-open {
+    flex: 1; min-width: 0; padding: 8px 4px 8px 10px; text-align: left; cursor: pointer;
+    background: none; border: 0; color: var(--ink); font: 14px/1.4 var(--sans);
+  }
+  .chat-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chat-actions { display: flex; gap: 2px; padding-right: 4px; opacity: 0; }
+  .chat-item:hover .chat-actions, .chat-item.active .chat-actions,
+  .chat-item:focus-within .chat-actions, .chat-item.confirming .chat-actions { opacity: 1; }
+  .chat-actions button {
+    height: 28px; min-width: 28px; padding: 0; display: flex; align-items: center; justify-content: center;
+    background: none; border: 0; border-radius: 7px; color: var(--muted); cursor: pointer;
+  }
+  .chat-actions button:hover { color: var(--accent); }
+  .chat-actions svg { width: 15px; height: 15px; }
+  .chat-actions .chat-delete.confirm { padding: 0 8px; background: var(--accent); color: #fff; font: 600 11.5px var(--sans); }
+  .rename-input {
+    flex: 1; min-width: 0; margin: 3px 4px 3px 6px; padding: 4px 6px; outline: none;
+    background: var(--bg); color: var(--ink); border: 1px solid var(--accent); border-radius: 7px; font: 14px var(--sans);
+  }
+  .sidebar-note { padding: 10px 16px 14px; border-top: 1px solid var(--line); font: 11px/1.5 var(--mono); color: var(--muted); }
+  .menu-btn, .backdrop { display: none; }
+
+  @media (max-width: 820px) {
+    .sidebar {
+      position: fixed; top: 0; bottom: 0; left: 0; z-index: 20; max-width: 85vw;
+      transform: translateX(-100%); visibility: hidden;
+      transition: transform 0.25s ease, visibility 0s linear 0.25s;
+    }
+    body.sidebar-open .sidebar { transform: none; visibility: visible; transition: transform 0.25s ease; }
+    .backdrop { position: fixed; inset: 0; z-index: 19; background: rgba(0, 0, 0, 0.45); }
+    body.sidebar-open .backdrop { display: block; }
+    .menu-btn { display: flex; }
+    .chat-actions { opacity: 1; }
+  }
+  @media (prefers-reduced-motion: reduce) { .sidebar { transition: none !important; } }
 </style>
 </head>
 <body>
+  <aside class="sidebar" id="sidebar" aria-label="Chat history">
+    <button class="new-chat" id="new-chat" type="button">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+      New chat
+    </button>
+    <nav class="chat-list" id="chat-list"></nav>
+    <div class="sidebar-note">Chats are saved in this browser only.</div>
+  </aside>
+  <div class="backdrop" id="backdrop"></div>
+
+  <div class="app">
   <header>
-    <div class="brand">kin<span>Sin</span></div>
+    <div class="header-left">
+      <button class="menu-btn" id="menu" type="button" aria-label="Open chat list" aria-controls="sidebar" aria-expanded="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+      </button>
+      <div class="brand">
+        <svg class="brand-icon" viewBox="0 0 64 64" aria-hidden="true">
+          <rect width="64" height="64" rx="16" fill="var(--accent)"/>
+          <path d="M16 14v36M16 36l13-12" fill="none" stroke="var(--logo-k)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M21 40C23 35.2 24.8 33 26.8 33S30.6 35.2 32.6 40 36.4 47 38.4 47 42.2 44.8 44.2 40 48 33 50 33" fill="none" stroke="var(--logo-wave)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="brand-name">kin<span>Sin</span></span>
+      </div>
+    </div>
     <div class="header-right">
       <div class="status"><span class="dot" id="dot"></span><span id="status">connecting…</span></div>
       <button class="theme-toggle" id="theme" type="button" aria-label="Switch to dark mode">
@@ -202,6 +292,7 @@
       <button id="reset" type="button">New chat</button>
     </div>
   </footer>
+  </div>
 
 <script>
 const thread = document.getElementById('thread');
@@ -230,8 +321,44 @@ themeBtn.addEventListener('click', () => {
 systemDark.addEventListener('change', updateThemeLabel);   // only matters while no choice is saved
 updateThemeLabel();
 
-let history = [];          // [{role, content}] sent to the server every turn
 let controller = null;     // lets the Stop button cancel the request
+
+// --- Saved chats ---
+// chats: [{ id, title, updated, messages: [{ role, content, meta? }] }], newest first when listed.
+// current: the open chat. A new chat only joins `chats` once its first message is sent.
+const STORE_KEY = 'kinsin-chats';
+let chats = loadChats();
+let current = blankChat();
+
+function blankChat() {
+  return { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8), title: 'New chat', updated: Date.now(), messages: [] };
+}
+function loadChats() {
+  try {
+    const data = JSON.parse(localStorage.getItem(STORE_KEY) || '[]');
+    if (!Array.isArray(data)) return [];
+    return data
+      .filter(c => c && typeof c.id === 'string' && Array.isArray(c.messages))
+      .map(c => ({
+        id: c.id,
+        title: String(c.title || 'Untitled').slice(0, 80),
+        updated: Number(c.updated) || 0,
+        messages: c.messages
+          .filter(m => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
+          .map(m => m.role === 'assistant'
+            ? { role: m.role, content: m.content, meta: typeof m.meta === 'string' ? m.meta : '' }
+            : { role: m.role, content: m.content }),
+      }))
+      .filter(c => c.messages.length);
+  } catch { return []; }   // blocked or corrupt storage: start with no history
+}
+function saveChats() {
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(chats)); } catch { /* blocked or full: keep going in memory */ }
+}
+function autoTitle(text) {
+  const first = text.split('\n')[0].trim();
+  return first.length > 42 ? first.slice(0, 40) + '…' : first;
+}
 
 // --- Server status: ask /v1/models which model is loaded ---
 fetch('/v1/models')
@@ -264,7 +391,14 @@ function setBusy(busy) {
 
 // --- Send a message and stream the reply ---
 async function send(text) {
-  history.push({ role: 'user', content: text });
+  const chat = current;                         // the reply is saved here even if the user switches away
+  if (!chat.messages.length) chat.title = autoTitle(text);
+  chat.messages.push({ role: 'user', content: text });
+  chat.updated = Date.now();
+  if (!chats.includes(chat)) chats.push(chat);
+  saveChats();
+  renderChatList();
+  const messages = chat.messages.map(({ role, content }) => ({ role, content }));   // never send meta
   addMessage('user', text);
 
   const bot = addMessage('assistant', '');
@@ -273,17 +407,18 @@ async function send(text) {
   cursor.className = 'cursor';
   body.after(cursor);
 
-  controller = new AbortController();
+  const myController = controller = new AbortController();
   setBusy(true);
   let reply = '';
+  let metaText = '';
   const started = performance.now();
 
   try {
     const res = await fetch('/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: history, stream: true }),
-      signal: controller.signal,
+      body: JSON.stringify({ messages, stream: true }),
+      signal: myController.signal,
     });
     if (!res.ok) throw new Error((await res.json()).error?.message || res.statusText);
 
@@ -308,33 +443,206 @@ async function send(text) {
         if (piece) {
           reply += piece;
           body.innerHTML = renderMarkdown(reply);
-          scrollDown();
+          if (bot.isConnected) scrollDown();
         }
         if (chunk.usage) {
           const u = chunk.usage;
-          meta(bot, `${u.completion_tokens} tokens · ${u.tokens_per_sec} tok/s · ${((performance.now() - started) / 1000).toFixed(1)}s`);
+          metaText = `${u.completion_tokens} tokens · ${u.tokens_per_sec} tok/s · ${((performance.now() - started) / 1000).toFixed(1)}s`;
+          meta(bot, metaText);
         }
       }
     }
   } catch (err) {
     if (err.name === 'AbortError') {
-      meta(bot, 'stopped');
+      metaText = 'stopped';
+      meta(bot, metaText);
     } else if (reply) {
-      meta(bot, 'Error: ' + err.message);   // keep the text that already arrived
+      metaText = 'Error: ' + err.message;
+      meta(bot, metaText);   // keep the text that already arrived
     } else {
       bot.classList.add('error');
       body.textContent = 'Error: ' + err.message;
     }
   } finally {
     cursor.remove();
-    if (reply) addReplyCopy(bot, reply);
-    if (reply) history.push({ role: 'assistant', content: reply });
-    else history.pop(); // nothing came back: forget the question too
-    controller = null;
-    setBusy(false);
-    input.focus();
+    if (reply) {
+      addReplyCopy(bot, reply);
+      chat.messages.push({ role: 'assistant', content: reply, meta: metaText });
+      chat.updated = Date.now();
+    } else {
+      // Nothing came back: forget the question too, and the chat if that leaves it empty
+      if (chat.messages.at(-1)?.role === 'user') chat.messages.pop();
+      if (!chat.messages.length) chats = chats.filter(c => c !== chat);
+    }
+    saveChats();
+    renderChatList();
+    // Switched away and back to this chat mid-reply: redraw it so the saved reply shows
+    if (chat === current && !bot.isConnected) showChat(chat);
+    // Only reset the Send button if a newer reply hasn't already started
+    if (controller === myController) {
+      controller = null;
+      setBusy(false);
+      input.focus();
+    }
   }
 }
+
+// Stop a reply that is still streaming (before switching or starting a chat)
+function stopReply() {
+  if (!controller) return;
+  controller.abort();
+  controller = null;
+  setBusy(false);
+}
+
+// --- Sidebar: open, new, rename, delete ---
+const chatList = document.getElementById('chat-list');
+const ICON = d => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${d}"/></svg>`;
+const PENCIL = ICON('M17 3a2.85 2.85 0 0 1 4 4L7.5 20.5 2 22l1.5-5.5Z');
+const TRASH = ICON('M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6');
+
+function showChat(chat) {
+  thread.querySelectorAll('.msg').forEach(m => m.remove());
+  empty.style.display = chat.messages.length ? 'none' : '';
+  for (const m of chat.messages) {
+    if (m.role === 'user') { addMessage('user', m.content); continue; }
+    const el = addMessage('assistant', '');
+    el.querySelector('.body').innerHTML = renderMarkdown(m.content);
+    if (m.meta) meta(el, m.meta);
+    addReplyCopy(el, m.content);
+  }
+  scrollDown();
+}
+
+function groupOf(ts) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const yesterday = new Date(today); yesterday.setDate(today.getDate() - 1);
+  const week = new Date(today); week.setDate(today.getDate() - 7);
+  if (ts >= today.getTime()) return 'Today';
+  if (ts >= yesterday.getTime()) return 'Yesterday';
+  if (ts >= week.getTime()) return 'Previous 7 days';
+  return 'Older';
+}
+
+function renderChatList() {
+  if (chatList.querySelector('.rename-input')) return;   // don't throw away a rename in progress
+  chatList.textContent = '';
+  let group = '';
+  for (const c of [...chats].sort((a, b) => b.updated - a.updated)) {
+    const g = groupOf(c.updated);
+    if (g !== group) {
+      group = g;
+      const label = document.createElement('div');
+      label.className = 'group-label';
+      label.textContent = g;
+      chatList.appendChild(label);
+    }
+    const item = document.createElement('div');
+    item.className = 'chat-item' + (c === current ? ' active' : '');
+    item.dataset.id = c.id;
+    item.innerHTML =
+      '<button type="button" class="chat-open"><span class="chat-title"></span></button>' +
+      '<div class="chat-actions">' +
+      `<button type="button" class="chat-rename" aria-label="Rename chat" title="Rename">${PENCIL}</button>` +
+      `<button type="button" class="chat-delete" aria-label="Delete chat" title="Delete">${TRASH}</button>` +
+      '</div>';
+    item.querySelector('.chat-title').textContent = c.title;   // titles are always plain text
+    chatList.appendChild(item);
+  }
+}
+
+function newChat() {
+  stopReply();
+  current = blankChat();
+  showChat(current);
+  renderChatList();
+  input.focus();
+}
+function openChat(id) {
+  const chat = chats.find(c => c.id === id);
+  if (!chat) return;
+  if (chat !== current) {
+    stopReply();
+    current = chat;
+    showChat(chat);
+    renderChatList();
+  }
+  closeSidebar();
+}
+function deleteChat(id) {
+  chats = chats.filter(c => c.id !== id);
+  saveChats();
+  if (current.id === id) newChat();   // deleted the open chat: show a fresh one
+  else renderChatList();
+}
+function startRename(item, chat) {
+  const inp = document.createElement('input');
+  inp.className = 'rename-input';
+  inp.maxLength = 80;
+  inp.value = chat.title;
+  inp.setAttribute('aria-label', 'Chat name');
+  item.querySelector('.chat-open').replaceWith(inp);
+  inp.focus();
+  inp.select();
+  let done = false;
+  const finish = save => {
+    if (done) return;
+    done = true;
+    const title = inp.value.trim().slice(0, 80);
+    if (save && title) { chat.title = title; saveChats(); }   // empty titles are ignored
+    inp.remove();
+    renderChatList();
+  };
+  inp.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(false); }
+  });
+  inp.addEventListener('blur', () => finish(true));
+}
+
+// One listener for the whole list
+chatList.addEventListener('click', e => {
+  const item = e.target.closest('.chat-item');
+  if (!item) return;
+  const chat = chats.find(c => c.id === item.dataset.id);
+  if (!chat) return;
+
+  const del = e.target.closest('.chat-delete');
+  if (del) {
+    if (del.classList.contains('confirm')) { clearTimeout(del.resetTimer); deleteChat(chat.id); return; }
+    // First click: ask. Goes back to the icon after 3 seconds.
+    del.classList.add('confirm');
+    del.textContent = 'Delete?';
+    del.setAttribute('aria-label', 'Click again to delete');
+    item.classList.add('confirming');
+    del.resetTimer = setTimeout(() => {
+      del.classList.remove('confirm');
+      del.innerHTML = TRASH;
+      del.setAttribute('aria-label', 'Delete chat');
+      item.classList.remove('confirming');
+    }, 3000);
+    return;
+  }
+  if (e.target.closest('.chat-rename')) { startRename(item, chat); return; }
+  if (e.target.closest('.chat-open')) openChat(chat.id);
+});
+
+// --- Mobile: slide-in sidebar ---
+const menuBtn = document.getElementById('menu');
+function openSidebar() {
+  document.body.classList.add('sidebar-open');
+  menuBtn.setAttribute('aria-expanded', 'true');
+}
+function closeSidebar() {
+  document.body.classList.remove('sidebar-open');
+  menuBtn.setAttribute('aria-expanded', 'false');
+}
+menuBtn.addEventListener('click', openSidebar);
+document.getElementById('backdrop').addEventListener('click', closeSidebar);
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && document.body.classList.contains('sidebar-open')) closeSidebar();
+});
+document.getElementById('new-chat').addEventListener('click', () => { newChat(); closeSidebar(); });
 
 // The line under a reply: stats text, plus a "copy" link once the reply is finished
 function metaLine(el) {
@@ -600,13 +908,10 @@ input.addEventListener('input', autosize);
 document.querySelectorAll('.chip').forEach(c => c.addEventListener('click', () => {
   if (!controller) send(c.textContent);
 }));
-document.getElementById('reset').addEventListener('click', () => {
-  if (controller) controller.abort();
-  history = [];
-  thread.querySelectorAll('.msg').forEach(m => m.remove());
-  empty.style.display = '';
-  input.focus();
-});
+document.getElementById('reset').addEventListener('click', () => { newChat(); closeSidebar(); });
+
+// Start every visit with a fresh chat; saved ones are in the sidebar
+renderChatList();
 </script>
 </body>
 </html>
