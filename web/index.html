@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rustllm</title>
+<style>
+  :root {
+    --bg: #f4efe6;
+    --paper: #fbf8f2;
+    --ink: #1f1b16;
+    --muted: #7a7064;
+    --line: #e4dccf;
+    --accent: #c2552d;       /* rust */
+    --accent-soft: #f3e1d6;
+    --user: #2a2620;
+    --mono: ui-monospace, "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+    --sans: ui-sans-serif, system-ui, "Segoe UI", Inter, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #171512; --paper: #1f1c18; --ink: #ede6da; --muted: #9a8f80;
+      --line: #2f2a24; --accent: #e07a4f; --accent-soft: #3a2a21; --user: #ede6da;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--ink); font: 16px/1.6 var(--sans);
+    display: flex; flex-direction: column;
+  }
+
+  header {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 14px 20px; border-bottom: 1px solid var(--line);
+  }
+  .brand { font: 600 18px var(--mono); letter-spacing: -0.02em; }
+  .brand span { color: var(--accent); }
+  .status { display: flex; align-items: center; gap: 8px; font: 12px var(--mono); color: var(--muted); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .dot.on { background: #4e9a62; }
+
+  main { flex: 1; overflow-y: auto; }
+  .thread { max-width: 760px; margin: 0 auto; padding: 28px 20px 12px; }
+
+  .empty { margin-top: 12vh; text-align: center; color: var(--muted); }
+  .empty h1 { font: 600 clamp(26px, 5vw, 38px)/1.15 var(--mono); color: var(--ink); margin: 0 0 10px; letter-spacing: -0.03em; }
+  .empty p { margin: 0 auto 22px; max-width: 440px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+  .chip {
+    border: 1px solid var(--line); background: var(--paper); color: var(--ink);
+    padding: 7px 12px; border-radius: 999px; font: 14px var(--sans); cursor: pointer;
+  }
+  .chip:hover { border-color: var(--accent); }
+
+  .msg { margin: 0 0 22px; }
+  .msg .who { font: 12px var(--mono); color: var(--muted); margin-bottom: 4px; }
+  .msg.user .body {
+    display: inline-block; background: var(--paper); border: 1px solid var(--line);
+    padding: 10px 14px; border-radius: 14px; color: var(--user);
+  }
+  .msg .body { white-space: pre-wrap; word-wrap: break-word; }
+  .msg .meta { font: 12px var(--mono); color: var(--muted); margin-top: 6px; }
+  .msg.error .body { color: #b3261e; }
+  .cursor {
+    display: inline-block; width: 8px; height: 1.1em; vertical-align: -0.15em;
+    background: var(--accent); margin-left: 2px; animation: blink 1s steps(2) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { .cursor { animation: none; } }
+
+  footer { border-top: 1px solid var(--line); background: var(--bg); }
+  form { max-width: 760px; margin: 0 auto; padding: 14px 20px 10px; display: flex; gap: 10px; align-items: flex-end; }
+  textarea {
+    flex: 1; resize: none; max-height: 180px; min-height: 48px;
+    background: var(--paper); color: var(--ink); border: 1px solid var(--line); border-radius: 14px;
+    padding: 12px 14px; font: 16px/1.5 var(--sans); outline: none;
+  }
+  textarea:focus { border-color: var(--accent); }
+  button.send {
+    height: 48px; padding: 0 18px; border: 0; border-radius: 14px; cursor: pointer;
+    background: var(--accent); color: #fff; font: 600 14px var(--sans);
+  }
+  button.send:disabled { opacity: 0.5; cursor: default; }
+  button.send.stop { background: var(--ink); color: var(--bg); }
+  .hint { max-width: 760px; margin: 0 auto; padding: 0 20px 12px; display: flex; justify-content: space-between; gap: 12px; font: 12px var(--mono); color: var(--muted); }
+  @media (max-width: 520px) { .hint span { display: none; } .hint { justify-content: flex-end; } }
+  .hint button { background: none; border: 0; color: var(--muted); font: inherit; cursor: pointer; padding: 0; text-decoration: underline; }
+</style>
+</head>
+<body>
+  <header>
+    <div class="brand">rust<span>llm</span></div>
+    <div class="status"><span class="dot" id="dot"></span><span id="status">connecting…</span></div>
+  </header>
+
+  <main id="scroller">
+    <div class="thread" id="thread">
+      <div class="empty" id="empty">
+        <h1>An LLM, running on a CPU.</h1>
+        <p>Written in Rust. No GPU, no cloud API: every word below is computed by this server, token by token.</p>
+        <div class="chips">
+          <button class="chip">What is Rust? Answer in two sentences.</button>
+          <button class="chip">Explain recursion with a simple example.</button>
+          <button class="chip">Write a haiku about a slow compiler.</button>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    <form id="form">
+      <textarea id="input" rows="1" placeholder="Ask anything…" autofocus></textarea>
+      <button class="send" id="send" type="submit">Send</button>
+    </form>
+    <div class="hint">
+      <span>Enter to send · Shift+Enter for a new line</span>
+      <button id="reset" type="button">New chat</button>
+    </div>
+  </footer>
+
+<script>
+const thread = document.getElementById('thread');
+const scroller = document.getElementById('scroller');
+const input = document.getElementById('input');
+const sendBtn = document.getElementById('send');
+const form = document.getElementById('form');
+const empty = document.getElementById('empty');
+
+let history = [];          // [{role, content}] sent to the server every turn
+let controller = null;     // lets the Stop button cancel the request
+
+// --- Server status: ask /v1/models which model is loaded ---
+fetch('/v1/models')
+  .then(r => r.json())
+  .then(d => {
+    const name = d.data[0].id.split(/[\\/]/).pop().replace('.gguf', '');
+    document.getElementById('status').textContent = name;
+    document.getElementById('dot').classList.add('on');
+  })
+  .catch(() => { document.getElementById('status').textContent = 'server offline'; });
+
+// --- Helpers ---
+function addMessage(role, text) {
+  empty.style.display = 'none';
+  const el = document.createElement('div');
+  el.className = 'msg ' + role;
+  el.innerHTML = `<div class="who">${role === 'user' ? 'you' : 'rustllm'}</div><div class="body"></div>`;
+  el.querySelector('.body').textContent = text;
+  thread.appendChild(el);
+  scrollDown();
+  return el;
+}
+function scrollDown() { scroller.scrollTop = scroller.scrollHeight; }
+function setBusy(busy) {
+  sendBtn.textContent = busy ? 'Stop' : 'Send';
+  sendBtn.classList.toggle('stop', busy);
+}
+
+// --- Send a message and stream the reply ---
+async function send(text) {
+  history.push({ role: 'user', content: text });
+  addMessage('user', text);
+
+  const bot = addMessage('assistant', '');
+  const body = bot.querySelector('.body');
+  const cursor = document.createElement('span');
+  cursor.className = 'cursor';
+  body.after(cursor);
+
+  controller = new AbortController();
+  setBusy(true);
+  let reply = '';
+  const started = performance.now();
+
+  try {
+    const res = await fetch('/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: history, stream: true }),
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error((await res.json()).error?.message || res.statusText);
+
+    // Read the Server-Sent Events stream chunk by chunk
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // Events are separated by a blank line; keep any unfinished one in the buffer
+      const events = buffer.split('\n\n');
+      buffer = events.pop();
+      for (const event of events) {
+        const data = event.replace(/^data: ?/, '');
+        if (data === '[DONE]') continue;
+        const chunk = JSON.parse(data);
+        if (chunk.error) throw new Error(chunk.error.message);
+        const piece = chunk.choices?.[0]?.delta?.content;
+        if (piece) {
+          reply += piece;
+          body.textContent = reply;
+          scrollDown();
+        }
+        if (chunk.usage) {
+          const u = chunk.usage;
+          meta(bot, `${u.completion_tokens} tokens · ${u.tokens_per_sec} tok/s · ${((performance.now() - started) / 1000).toFixed(1)}s`);
+        }
+      }
+    }
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      meta(bot, 'stopped');
+    } else {
+      bot.classList.add('error');
+      body.textContent = reply || ('Error: ' + err.message);
+    }
+  } finally {
+    cursor.remove();
+    if (reply) history.push({ role: 'assistant', content: reply });
+    else history.pop(); // nothing came back: forget the question too
+    controller = null;
+    setBusy(false);
+    input.focus();
+  }
+}
+
+function meta(el, text) {
+  let m = el.querySelector('.meta');
+  if (!m) { m = document.createElement('div'); m.className = 'meta'; el.appendChild(m); }
+  m.textContent = text;
+}
+
+// --- Input handling ---
+form.addEventListener('submit', e => {
+  e.preventDefault();
+  if (controller) { controller.abort(); return; }   // button is "Stop" while generating
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  autosize();
+  send(text);
+});
+input.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); }
+});
+function autosize() { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 180) + 'px'; }
+input.addEventListener('input', autosize);
+
+document.querySelectorAll('.chip').forEach(c => c.addEventListener('click', () => {
+  if (!controller) send(c.textContent);
+}));
+document.getElementById('reset').addEventListener('click', () => {
+  if (controller) controller.abort();
+  history = [];
+  thread.querySelectorAll('.msg').forEach(m => m.remove());
+  empty.style.display = '';
+  input.focus();
+});
+</script>
+</body>
+</html>

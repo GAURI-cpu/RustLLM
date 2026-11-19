@@ -1,17 +1,14 @@
-//! HTTP server with an OpenAI-compatible API.
-//!
+//!   GET  /                      -> the chat web page
 //!   GET  /health                -> "ok"
+//!   GET  /v1/models             -> which model is loaded
 //!   POST /v1/chat/completions   -> a reply, streamed or all at once
-//!
-//! The model can only work on one request at a time on a CPU, so requests
-//! wait in a queue and a single worker thread answers them in order.
 
 use std::sync::mpsc;
 
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
-use axum::response::{IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
@@ -90,16 +87,27 @@ pub async fn serve(engine: Engine, model_name: String, port: u16) -> anyhow::Res
 
     let state = AppState { queue, model_name };
     let app = Router::new()
+        .route("/", get(|| async { Html(include_str!("../web/index.html")) }))
         .route("/health", get(|| async { "ok" }))
+        .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(chat_completions))
-        .layer(CorsLayer::permissive()) // allow a website on another port to call us
+        .layer(CorsLayer::permissive())
         .with_state(state);
-
+    
     let address = format!("0.0.0.0:{port}");
     let listener = tokio::net::TcpListener::bind(&address).await?;
     println!("Server running on http://localhost:{port}");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+// ---------- GET /v1/models ----------
+
+async fn list_models(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(json!({
+        "object": "list",
+        "data": [{ "id": state.model_name, "object": "model", "owned_by": "rustllm" }]
+    }))
 }
 
 // ---------- POST /v1/chat/completions ----------
