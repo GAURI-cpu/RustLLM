@@ -51,7 +51,7 @@ impl Engine {
         prompt: &str,
         opts: &SamplingOptions,
         max_tokens: usize,
-        mut on_text: impl FnMut(&str),
+        mut on_text: impl FnMut(&str) -> bool,
     ) -> Result<(String, Stats)> {
         // New request: forget the old KV cache, we read the whole prompt again
         self.model.clear_kv_cache();
@@ -76,8 +76,11 @@ impl Engine {
             // Clean streaming: send only the new, complete part of the text
             let text = self.tokenizer.decode(&tokens[prompt_len..], false).map_err(anyhow::Error::msg)?;
             if text.len() > reply.len() && !text.ends_with('\u{FFFD}') {
-                on_text(&text[reply.len()..]);
+                               let keep_going = on_text(&text[reply.len()..]);
                 reply = text;
+                if !keep_going {
+                    break;
+                }
             }
 
             let input = Tensor::new(&[next], &self.device)?.unsqueeze(0)?;

@@ -1,10 +1,13 @@
-//! RustLLM: a CPU-only LLM chat in the terminal.
-//!   cargo run --release
+//! RustLLM: CPU-only LLM inference in Rust.
+//!   cargo run --release                         chat in the terminal
+//!   cargo run --release -- --serve              start the HTTP server on port 8080
+//!   cargo run --release -- --serve --port 3001  another port
 //!   cargo run --release -- --model models/other-model.gguf
 
 mod chat;
 mod engine;
 mod sampler;
+mod server;
 
 use std::io::Write;
 
@@ -18,6 +21,8 @@ fn main() -> Result<()> {
     // Defaults, which can be changed from the command line
     let mut model_path = "models/qwen2.5-0.5b-instruct-q4_k_m.gguf".to_string();
     let mut tokenizer_path = "models/tokenizer.json".to_string();
+    let mut serve = false;
+    let mut port: u16 = 8080;
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -31,6 +36,11 @@ fn main() -> Result<()> {
                 tokenizer_path = args[i + 1].clone();
                 i += 1;
             }
+            "--serve" => serve = true,
+            "--port" if i + 1 < args.len() => {
+                port = args[i + 1].parse()?;
+                i += 1;
+            }
             other => anyhow::bail!("unknown option: {other}"),
         }
         i += 1;
@@ -39,6 +49,13 @@ fn main() -> Result<()> {
     println!("AVX enabled: {}", candle_core::utils::with_avx());
     println!("Loading {} ...", model_path);
     let mut engine = Engine::load(&model_path, &tokenizer_path)?;
+
+    if serve {
+        // Start the async runtime and run the server until Ctrl+C
+        let runtime = tokio::runtime::Runtime::new()?;
+        return runtime.block_on(server::serve(engine, model_path, port));
+    }
+
     let opts = SamplingOptions::default();
 
     let mut history: Vec<Message> = Vec::new();
@@ -71,6 +88,7 @@ fn main() -> Result<()> {
         let (reply, stats) = engine.generate(&prompt, &opts, 500, |piece| {
             print!("{}", piece);
             let _ = std::io::stdout().flush();
+            true // keep going
         })?;
         println!(
             "\n[{} prompt tokens | {} new tokens @ {:.1} tok/s]\n",

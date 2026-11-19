@@ -1,0 +1,6 @@
+{
+  "messages": [
+    { "role": "user", "content": "What is Rust? Answer in two sentences." }
+  ],
+  "stream": true
+}
