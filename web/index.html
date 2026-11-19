@@ -4,6 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>kinSin</title>
+<script>
+  // Apply a saved light/dark choice before the first paint (no flash). No choice = follow the system.
+  try {
+    const t = localStorage.getItem('kinsin-theme');
+    if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+  } catch { /* storage blocked: just follow the system */ }
+</script>
 <style>
   :root {
     --bg: #f9ecec;
@@ -14,14 +21,27 @@
     --accent: #8a1c3b;       /* wine */
     --accent-soft: #f3d6de;
     --user: #2a1a1e;
+    --code-bg: #2a1a1e;
+    --code-ink: #f6e9eb;
     --mono: ui-monospace, "JetBrains Mono", "Cascadia Code", Consolas, monospace;
     --sans: ui-sans-serif, system-ui, "Segoe UI", Inter, sans-serif;
+    color-scheme: light;
   }
+  /* Dark: when the system is dark and the user hasn't picked light... */
   @media (prefers-color-scheme: dark) {
-    :root {
+    :root:not([data-theme="light"]) {
       --bg: #1c1215; --paper: #26191d; --ink: #f3e6e8; --muted: #a88c92;
       --line: #36242a; --accent: #c94a6e; --accent-soft: #3d2029; --user: #f3e6e8;
+      --code-bg: #140c0f; --code-ink: #f3e6e8;
+      color-scheme: dark;
     }
+  }
+  /* ...or when the user picked dark */
+  :root[data-theme="dark"] {
+    --bg: #1c1215; --paper: #26191d; --ink: #f3e6e8; --muted: #a88c92;
+    --line: #36242a; --accent: #c94a6e; --accent-soft: #3d2029; --user: #f3e6e8;
+    --code-bg: #140c0f; --code-ink: #f3e6e8;
+    color-scheme: dark;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
@@ -39,6 +59,25 @@
   .status { display: flex; align-items: center; gap: 8px; font: 12px var(--mono); color: var(--muted); }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
   .dot.on { background: #4e9a62; }
+  .status { min-width: 0; }
+  .dot { flex-shrink: 0; }
+  #status { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .header-right { display: flex; align-items: center; gap: 14px; min-width: 0; }
+  .theme-toggle {
+    flex-shrink: 0; width: 34px; height: 34px; padding: 0; border-radius: 10px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--paper); border: 1px solid var(--line); color: var(--ink);
+  }
+  .theme-toggle:hover { border-color: var(--accent); color: var(--accent); }
+  .theme-toggle svg { width: 17px; height: 17px; }
+  /* Moon in light mode, sun in dark mode (follows the same rules as the colours) */
+  .icon-sun { display: none; }
+  :root[data-theme="dark"] .icon-sun { display: block; }
+  :root[data-theme="dark"] .icon-moon { display: none; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .icon-sun { display: block; }
+    :root:not([data-theme="light"]) .icon-moon { display: none; }
+  }
 
   main { flex: 1; overflow-y: auto; }
   .thread { max-width: 760px; margin: 0 auto; padding: 28px 20px 12px; }
@@ -57,11 +96,50 @@
   .msg .who { font: 12px var(--mono); color: var(--muted); margin-bottom: 4px; }
   .msg.user .body {
     display: inline-block; background: var(--paper); border: 1px solid var(--line);
-    padding: 10px 14px; border-radius: 14px; color: var(--user);
+    padding: 10px 14px; border-radius: 14px; color: var(--user); max-width: 100%;
   }
-  .msg .body { white-space: pre-wrap; word-wrap: break-word; }
+  .msg .body { word-wrap: break-word; }
+  .msg.user .body, .msg.error .body { white-space: pre-wrap; }
   .msg .meta { font: 12px var(--mono); color: var(--muted); margin-top: 6px; }
   .msg.error .body { color: #b3261e; }
+  .meta .copy-reply { background: none; border: 0; color: var(--muted); font: inherit; cursor: pointer; padding: 0; text-decoration: underline; }
+  .meta .stats:not(:empty) + .copy-reply { margin-left: 10px; }
+
+  /* Formatted (Markdown) assistant replies */
+  .md > :first-child { margin-top: 0; }
+  .md > :last-child { margin-bottom: 0; }
+  .md p { margin: 0 0 0.8em; }
+  .md h3, .md h4 { line-height: 1.3; font-weight: 650; margin: 1.2em 0 0.5em; }
+  .md h3 { font-size: 1.15rem; }
+  .md h4 { font-size: 1.02rem; }
+  .md strong { font-weight: 650; }
+  .md a { color: var(--accent); text-underline-offset: 2px; }
+  .md ul, .md ol { margin: 0 0 0.8em; padding-left: 1.5em; }
+  .md li { margin: 0.2em 0; }
+  .md li::marker { color: var(--accent); }
+  .md li > p { margin: 0 0 0.4em; }
+  .md li > :last-child { margin-bottom: 0; }
+  .md li > ul, .md li > ol { margin-top: 0.2em; }
+  .md blockquote { margin: 0 0 0.8em; padding: 0.1em 0 0.1em 1em; border-left: 3px solid var(--accent); color: var(--muted); }
+  .md hr { border: 0; border-top: 1px solid var(--line); margin: 1.2em 0; }
+  .md :not(pre) > code { font: 0.88em var(--mono); background: var(--accent-soft); padding: 0.1em 0.35em; border-radius: 5px; }
+  .codeblock { margin: 0 0 0.9em; background: var(--code-bg); color: var(--code-ink); border-radius: 12px; overflow: hidden; }
+  .code-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 6px 10px 6px 14px; font: 12px var(--mono); border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  }
+  .code-head span { opacity: 0.7; }
+  .copy-code {
+    background: none; color: inherit; border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 6px;
+    padding: 2px 9px; font: 12px var(--mono); cursor: pointer;
+  }
+  .copy-code:hover { border-color: rgba(255, 255, 255, 0.45); }
+  .codeblock pre { margin: 0; padding: 12px 14px 14px; overflow-x: auto; font: 13.5px/1.55 var(--mono); tab-size: 4; }
+  .codeblock code { font: inherit; white-space: pre; }
+  .table-wrap { overflow-x: auto; margin: 0 0 0.9em; }
+  .md table { border-collapse: collapse; font-size: 0.94em; }
+  .md th, .md td { border: 1px solid var(--line); padding: 6px 10px; text-align: left; vertical-align: top; }
+  .md th { background: var(--accent-soft); font-weight: 600; }
   .cursor {
     display: inline-block; width: 8px; height: 1.1em; vertical-align: -0.15em;
     background: var(--accent); margin-left: 2px; animation: blink 1s steps(2) infinite;
@@ -91,7 +169,13 @@
 <body>
   <header>
     <div class="brand">kin<span>Sin</span></div>
-    <div class="status"><span class="dot" id="dot"></span><span id="status">connecting…</span></div>
+    <div class="header-right">
+      <div class="status"><span class="dot" id="dot"></span><span id="status">connecting…</span></div>
+      <button class="theme-toggle" id="theme" type="button" aria-label="Switch to dark mode">
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+      </button>
+    </div>
   </header>
 
   <main id="scroller">
@@ -127,6 +211,25 @@ const sendBtn = document.getElementById('send');
 const form = document.getElementById('form');
 const empty = document.getElementById('empty');
 
+// --- Light/dark toggle ---
+// The icon is switched by CSS; here we flip data-theme, remember it, and keep the label right.
+const themeBtn = document.getElementById('theme');
+const systemDark = matchMedia('(prefers-color-scheme: dark)');
+function shownTheme() {
+  return document.documentElement.dataset.theme || (systemDark.matches ? 'dark' : 'light');
+}
+function updateThemeLabel() {
+  themeBtn.setAttribute('aria-label', shownTheme() === 'dark' ? 'Switch to light mode' : 'Switch to dark mode');
+}
+themeBtn.addEventListener('click', () => {
+  const next = shownTheme() === 'dark' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem('kinsin-theme', next); } catch { /* storage blocked: works for this visit only */ }
+  updateThemeLabel();
+});
+systemDark.addEventListener('change', updateThemeLabel);   // only matters while no choice is saved
+updateThemeLabel();
+
 let history = [];          // [{role, content}] sent to the server every turn
 let controller = null;     // lets the Stop button cancel the request
 
@@ -146,7 +249,9 @@ function addMessage(role, text) {
   const el = document.createElement('div');
   el.className = 'msg ' + role;
   el.innerHTML = `<div class="who">${role === 'user' ? 'you' : 'kinSin'}</div><div class="body"></div>`;
-  el.querySelector('.body').textContent = text;
+  const body = el.querySelector('.body');
+  body.textContent = text;
+  if (role === 'assistant') body.classList.add('md');
   thread.appendChild(el);
   scrollDown();
   return el;
@@ -202,7 +307,7 @@ async function send(text) {
         const piece = chunk.choices?.[0]?.delta?.content;
         if (piece) {
           reply += piece;
-          body.textContent = reply;
+          body.innerHTML = renderMarkdown(reply);
           scrollDown();
         }
         if (chunk.usage) {
@@ -214,12 +319,15 @@ async function send(text) {
   } catch (err) {
     if (err.name === 'AbortError') {
       meta(bot, 'stopped');
+    } else if (reply) {
+      meta(bot, 'Error: ' + err.message);   // keep the text that already arrived
     } else {
       bot.classList.add('error');
-      body.textContent = reply || ('Error: ' + err.message);
+      body.textContent = 'Error: ' + err.message;
     }
   } finally {
     cursor.remove();
+    if (reply) addReplyCopy(bot, reply);
     if (reply) history.push({ role: 'assistant', content: reply });
     else history.pop(); // nothing came back: forget the question too
     controller = null;
@@ -228,10 +336,249 @@ async function send(text) {
   }
 }
 
-function meta(el, text) {
+// The line under a reply: stats text, plus a "copy" link once the reply is finished
+function metaLine(el) {
   let m = el.querySelector('.meta');
-  if (!m) { m = document.createElement('div'); m.className = 'meta'; el.appendChild(m); }
-  m.textContent = text;
+  if (!m) {
+    m = document.createElement('div');
+    m.className = 'meta';
+    m.innerHTML = '<span class="stats"></span>';
+    el.appendChild(m);
+  }
+  return m;
+}
+function meta(el, text) { metaLine(el).querySelector('.stats').textContent = text; }
+function addReplyCopy(el, raw) {
+  el.rawReply = raw;
+  const m = metaLine(el);
+  if (!m.querySelector('.copy-reply')) m.insertAdjacentHTML('beforeend', '<button type="button" class="copy-reply">copy</button>');
+}
+
+// --- Copy buttons (one delegated listener for every message) ---
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); return true; }
+  } catch { /* fall through to the old way */ }
+  // Fallback for plain-http pages (e.g. opened from another device on the LAN)
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;';
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch { ok = false; }
+  ta.remove();
+  return ok;
+}
+thread.addEventListener('click', async e => {
+  const btn = e.target.closest('.copy-code, .copy-reply');
+  if (!btn) return;
+  const text = btn.classList.contains('copy-code')
+    ? btn.closest('.codeblock').querySelector('code').textContent
+    : btn.closest('.msg').rawReply || '';
+  const ok = await copyText(text);
+  const label = btn.dataset.label || (btn.dataset.label = btn.textContent);
+  btn.textContent = ok ? 'Copied' : 'Copy failed';
+  clearTimeout(btn.resetTimer);
+  btn.resetTimer = setTimeout(() => { btn.textContent = label; }, 1500);
+});
+
+// --- Markdown renderer ---
+// No libraries. All model text is HTML-escaped before any tag is added, so the only
+// tags that can appear are the ones built here.
+function esc(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+function indentOf(line) {
+  let col = 0;
+  for (const ch of line) {
+    if (ch === ' ') col++;
+    else if (ch === '\t') col += 4;
+    else break;
+  }
+  return col;
+}
+function dedent(line, n) {
+  let i = 0, col = 0;
+  while (i < line.length && col < n && (line[i] === ' ' || line[i] === '\t')) { col += line[i] === '\t' ? 4 : 1; i++; }
+  return line.slice(i);
+}
+
+const FENCE = /^([ \t]*)(`{3,}|~{3,})[ \t]*([^\s`]*)[^`]*$/;
+const HEADING = /^[ \t]{0,3}(#{1,6})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$/;
+const HR = /^[ \t]{0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
+const QUOTE = /^[ \t]*>/;
+const LIST = /^([ \t]*)([-*+]|\d{1,9}[.)])(?:[ \t]+(.*))?$/;
+const TABLE_DIVIDER = /^[ \t]*\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$/;
+
+function renderMarkdown(text) {
+  return renderBlocks(text.replace(/\r\n?/g, '\n').replace(/\u0000/g, '').split('\n'));
+}
+
+function isTableStart(lines, i) {
+  return lines[i].includes('|') && i + 1 < lines.length &&
+    lines[i + 1].includes('|') && TABLE_DIVIDER.test(lines[i + 1]);
+}
+function isBlockStart(lines, i) {
+  const l = lines[i];
+  return FENCE.test(l) || HEADING.test(l) || HR.test(l) || QUOTE.test(l) || LIST.test(l) || isTableStart(lines, i);
+}
+
+function renderBlocks(lines) {
+  let html = '';
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    let m;
+    if (!line.trim()) { i++; continue; }
+
+    if ((m = line.match(FENCE))) {
+      // Fenced code block; an unclosed fence (still streaming) runs to the end
+      const indent = indentOf(m[1]), fence = m[2];
+      const code = [];
+      i++;
+      while (i < lines.length) {
+        const t = lines[i].trim();
+        if (t.length >= fence.length && t === fence[0].repeat(t.length)) { i++; break; }
+        code.push(dedent(lines[i], indent));
+        i++;
+      }
+      html += codeBlock(m[3], code.join('\n'));
+    } else if ((m = line.match(HEADING))) {
+      const tag = m[1].length === 1 ? 'h3' : 'h4';
+      html += `<${tag}>${inline(m[2])}</${tag}>`;
+      i++;
+    } else if (HR.test(line)) {
+      html += '<hr>';
+      i++;
+    } else if (QUOTE.test(line)) {
+      const inner = [];
+      while (i < lines.length && QUOTE.test(lines[i])) inner.push(lines[i++].replace(/^[ \t]*> ?/, ''));
+      html += `<blockquote>${renderBlocks(inner)}</blockquote>`;
+    } else if (isTableStart(lines, i)) {
+      const [part, next] = renderTable(lines, i);
+      html += part;
+      i = next;
+    } else if (LIST.test(line)) {
+      const [part, next] = renderList(lines, i);
+      html += part;
+      i = next;
+    } else {
+      // Paragraph: runs until a blank line or the start of another block
+      const para = [line.trim()];
+      i++;
+      while (i < lines.length && lines[i].trim() && !isBlockStart(lines, i)) para.push(lines[i++].trim());
+      html += `<p>${inline(para.join('\n'))}</p>`;
+    }
+  }
+  return html;
+}
+
+function codeBlock(lang, code) {
+  return '<div class="codeblock"><div class="code-head">' +
+    `<span>${esc(lang || 'code')}</span><button type="button" class="copy-code">Copy</button>` +
+    `</div><pre><code>${esc(code)}</code></pre></div>`;
+}
+
+function renderList(lines, i) {
+  const first = lines[i].match(LIST);
+  const base = indentOf(first[1]);
+  const ordered = /\d/.test(first[2]);
+  const start = ordered ? parseInt(first[2], 10) : 1;
+  let html = ordered ? (start !== 1 ? `<ol start="${start}">` : '<ol>') : '<ul>';
+
+  while (i < lines.length) {
+    const m = lines[i].match(LIST);
+    // Stop at anything that isn't another item of this same list
+    if (!m || HR.test(lines[i]) || indentOf(m[1]) > base + 1 || /\d/.test(m[2]) !== ordered) break;
+
+    // The item's own lines: its first line, then everything indented under it
+    // (continuation text, nested lists, code blocks), dedented and rendered as blocks.
+    const contentIndent = indentOf(m[1]) + m[2].length + 1;
+    const body = [m[3] || ''];
+    i++;
+    while (i < lines.length) {
+      const l = lines[i];
+      if (!l.trim()) {
+        let j = i + 1;
+        while (j < lines.length && !lines[j].trim()) j++;
+        if (j < lines.length && indentOf(lines[j]) > base + 1) {
+          while (i < j) { body.push(''); i++; }
+          continue;
+        }
+        break;
+      }
+      if (indentOf(l) <= base + 1) break;
+      body.push(dedent(l, contentIndent));
+      i++;
+    }
+    html += `<li>${renderBlocks(body)}</li>`;
+    while (i < lines.length && !lines[i].trim()) i++;   // blank lines between items
+  }
+  return [html + (ordered ? '</ol>' : '</ul>'), i];
+}
+
+// Split a table row on | (but not \| or a | inside `code`)
+function splitRow(line) {
+  let s = line.trim();
+  if (s.startsWith('|')) s = s.slice(1);
+  if (s.endsWith('|') && !s.endsWith('\\|')) s = s.slice(0, -1);
+  const cells = [];
+  let cur = '', inCode = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (ch === '\\' && s[i + 1] === '|') { cur += '|'; i++; }
+    else if (ch === '`') { inCode = !inCode; cur += ch; }
+    else if (ch === '|' && !inCode) { cells.push(cur.trim()); cur = ''; }
+    else cur += ch;
+  }
+  cells.push(cur.trim());
+  return cells;
+}
+function renderTable(lines, i) {
+  const head = splitRow(lines[i]);
+  const aligns = splitRow(lines[i + 1]).map(c =>
+    /^:-+:$/.test(c) ? 'center' : /-:$/.test(c) ? 'right' : '');
+  const cell = (tag, text, k) =>
+    `<${tag}${aligns[k] ? ` style="text-align:${aligns[k]}"` : ''}>${inline(text)}</${tag}>`;
+  let html = '<div class="table-wrap"><table><thead><tr>' +
+    head.map((c, k) => cell('th', c, k)).join('') + '</tr></thead><tbody>';
+  i += 2;
+  while (i < lines.length && lines[i].trim() && lines[i].includes('|')) {
+    const row = splitRow(lines[i++]);
+    html += '<tr>' + head.map((_, k) => cell('td', row[k] || '', k)).join('') + '</tr>';
+  }
+  return [html + '</tbody></table></div>', i];
+}
+
+// Inline formatting. Code spans and links are swapped out for \u0000n\u0000 placeholders
+// so bold/italic rules can't touch their insides, then put back at the end.
+function inline(text) {
+  const held = [];
+  const hold = html => '\u0000' + (held.push(html) - 1) + '\u0000';
+
+  let s = text.replace(/(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)/g, (_, ticks, code) => {
+    if (/^ .*[^ ].* $/.test(code)) code = code.slice(1, -1);
+    return hold(`<code>${esc(code)}</code>`);
+  });
+  s = esc(s);
+  // Links: http(s) only. The URL is already escaped, so it can't break out of the attribute.
+  s = s.replace(/\[([^\]\n]+)\]\(\s*(https?:\/\/[^\s)\u0000]+)\s*\)/gi, (_, label, url) =>
+    hold(`<a href="${url}" target="_blank" rel="noopener noreferrer">${emphasis(label)}</a>`));
+  s = emphasis(s).replace(/\n/g, '<br>');
+
+  const restore = str => str.replace(/\u0000(\d+)\u0000/g, (_, n) => restore(held[n]));
+  return restore(s);
+}
+function emphasis(s) {
+  return s
+    .replace(/\*\*\*(?=\S)([\s\S]*?\S)\*\*\*/g, '<strong><em>$1</em></strong>')
+    .replace(/\*\*(?=\S)([\s\S]*?\S)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|[^\w])__(?=\S)([\s\S]*?\S)__(?!\w)/g, '$1<strong>$2</strong>')
+    .replace(/(^|[^\w*])\*(?=[^\s*])([^*\n]*?[^\s*])\*(?![\w*])/g, '$1<em>$2</em>')
+    .replace(/(^|[^\w])_(?=[^\s_])([^_\n]*?[^\s_])_(?!\w)/g, '$1<em>$2</em>')
+    .replace(/~~(?=\S)([\s\S]*?\S)~~/g, '<del>$1</del>');
 }
 
 // --- Input handling ---
