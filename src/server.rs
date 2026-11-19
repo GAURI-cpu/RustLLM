@@ -1,10 +1,18 @@
+//! HTTP server with an OpenAI-compatible API.
+//!
 //!   GET  /                      -> the chat web page
 //!   GET  /health                -> "ok"
 //!   GET  /v1/models             -> which model is loaded
 //!   POST /v1/chat/completions   -> a reply, streamed or all at once
+//!
+//! The model can only work on one request at a time on a CPU, so requests
+//! wait in a queue and a single worker thread answers them in order.
 
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, mpsc};
+use std::time::{Duration, Instant};
 
+use axum::extract::DefaultBodyLimit;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
@@ -17,9 +25,25 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tower_http::cors::CorsLayer;
 
-use crate::chat::{Message, Role, build_prompt};
+use crate::chat::{Message, Role, build_prompt_within};
 use crate::engine::{Engine, Stats};
 use crate::sampler::SamplingOptions;
+
+// ---------- Limits that keep the server healthy ----------
+
+/// Requests allowed in the system at once (1 being answered + the rest waiting).
+const MAX_PENDING: usize = 8;
+/// Largest request body accepted, in bytes.
+const MAX_BODY_BYTES: usize = 64 * 1024;
+/// Most messages in one conversation.
+const MAX_MESSAGES: usize = 200;
+/// Longest single message, in characters.
+const MAX_MESSAGE_CHARS: usize = 16_000;
+/// Default and maximum reply length, in tokens.
+const DEFAULT_MAX_TOKENS: usize = 512;
+const LIMIT_MAX_TOKENS: usize = 1024;
+/// A reply that takes longer than this is cut off.
+const GENERATION_TIMEOUT: Duration = Duration::from_secs(120);
 
 // ---------- What the client sends (same shape as OpenAI) ----------
 
@@ -43,7 +67,8 @@ struct ChatMessage {
 
 /// One request waiting for the model.
 struct Job {
-    prompt: String,
+    /// The conversation; the worker turns it into a prompt that fits the context.
+    history: Vec<Message>,
     opts: SamplingOptions,
     max_tokens: usize,
     /// Where the worker sends the reply, piece by piece.
@@ -61,39 +86,63 @@ enum Piece {
 #[derive(Clone)]
 struct AppState {
     queue: mpsc::Sender<Job>,
+    /// How many requests are waiting or being answered right now.
+    pending: Arc<AtomicUsize>,
     model_name: String,
 }
 
 /// The worker: owns the engine and answers jobs one by one, forever.
-fn run_worker(mut engine: Engine, jobs: mpsc::Receiver<Job>) {
+fn run_worker(mut engine: Engine, jobs: mpsc::Receiver<Job>, pending: Arc<AtomicUsize>) {
     for job in jobs {
-        let reply_to = job.reply_to;
-        let result = engine.generate(&job.prompt, &job.opts, job.max_tokens, |piece| {
-            // If sending fails, the client has disconnected: stop generating.
-            reply_to.send(Piece::Text(piece.to_string())).is_ok()
-        });
-        let _ = match result {
-            Ok((_, stats)) => reply_to.send(Piece::Done(stats)),
-            Err(e) => reply_to.send(Piece::Failed(e.to_string())),
-        };
+        answer(&mut engine, job);
+        // This request is finished: make room in the queue
+        pending.fetch_sub(1, Ordering::SeqCst);
     }
+}
+
+fn answer(engine: &mut Engine, job: Job) {
+    let reply_to = job.reply_to;
+
+    // Keep the prompt small enough to leave room for the reply
+    let max_tokens = job.max_tokens.min(engine.max_context() / 2);
+    let prompt_budget = engine.max_context() - max_tokens;
+    let prompt = match build_prompt_within(&job.history, prompt_budget, |text| engine.count_tokens(text)) {
+        Ok(prompt) => prompt,
+        Err(e) => {
+            let _ = reply_to.send(Piece::Failed(e.to_string()));
+            return;
+        }
+    };
+
+    let deadline = Instant::now() + GENERATION_TIMEOUT;
+    let result = engine.generate(&prompt, &job.opts, max_tokens, |piece| {
+        // Stop if the client disconnected, or if this reply is taking too long
+        reply_to.send(Piece::Text(piece.to_string())).is_ok() && Instant::now() < deadline
+    });
+    let _ = match result {
+        Ok((_, stats)) => reply_to.send(Piece::Done(stats)),
+        Err(e) => reply_to.send(Piece::Failed(e.to_string())),
+    };
 }
 
 // ---------- Starting the server ----------
 
 pub async fn serve(engine: Engine, model_name: String, port: u16) -> anyhow::Result<()> {
     let (queue, jobs) = mpsc::channel::<Job>();
-    std::thread::spawn(move || run_worker(engine, jobs));
+    let pending = Arc::new(AtomicUsize::new(0));
+    let worker_pending = pending.clone();
+    std::thread::spawn(move || run_worker(engine, jobs, worker_pending));
 
-    let state = AppState { queue, model_name };
+    let state = AppState { queue, pending, model_name };
     let app = Router::new()
         .route("/", get(|| async { Html(include_str!("../web/index.html")) }))
         .route("/health", get(|| async { "ok" }))
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(chat_completions))
-        .layer(CorsLayer::permissive())
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES)) // reject huge requests early
+        .layer(CorsLayer::permissive()) // allow a website on another port to call us
         .with_state(state);
-    
+
     let address = format!("0.0.0.0:{port}");
     let listener = tokio::net::TcpListener::bind(&address).await?;
     println!("Server running on http://localhost:{port}");
@@ -113,35 +162,48 @@ async fn list_models(State(state): State<AppState>) -> Json<serde_json::Value> {
 // ---------- POST /v1/chat/completions ----------
 
 async fn chat_completions(State(state): State<AppState>, Json(request): Json<ChatRequest>) -> Response {
-    // 1. Turn the request's messages into our own Message type
-    let mut history = Vec::new();
-    for m in &request.messages {
-        match Role::parse(&m.role) {
-            Some(role) => history.push(Message { role, text: m.content.clone() }),
-            None => return error(StatusCode::BAD_REQUEST, &format!("unknown role '{}'", m.role)),
-        }
-    }
-    if history.is_empty() {
+    // 1. Check the input
+    if request.messages.is_empty() {
         return error(StatusCode::BAD_REQUEST, "messages must not be empty");
     }
+    if request.messages.len() > MAX_MESSAGES {
+        return error(StatusCode::BAD_REQUEST, &format!("at most {MAX_MESSAGES} messages are allowed"));
+    }
+    let mut history = Vec::new();
+    for m in &request.messages {
+        let Some(role) = Role::parse(&m.role) else {
+            return error(StatusCode::BAD_REQUEST, &format!("unknown role '{}'", m.role));
+        };
+        if m.content.chars().count() > MAX_MESSAGE_CHARS {
+            return error(StatusCode::BAD_REQUEST, &format!("a message can be at most {MAX_MESSAGE_CHARS} characters"));
+        }
+        history.push(Message { role, text: m.content.clone() });
+    }
 
-    // 2. Settings: the request's values, or our defaults
+    // 2. Settings: the request's values (within limits), or our defaults
     let defaults = SamplingOptions::default();
     let opts = SamplingOptions {
-        temperature: request.temperature.unwrap_or(defaults.temperature),
-        top_k: request.top_k.unwrap_or(defaults.top_k),
+        temperature: request.temperature.unwrap_or(defaults.temperature).clamp(0.0, 2.0),
+        top_k: request.top_k.unwrap_or(defaults.top_k).clamp(1, 200),
         repeat_penalty: defaults.repeat_penalty,
     };
-    let max_tokens = request.max_tokens.unwrap_or(512).min(2048);
+    let max_tokens = request.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS).clamp(1, LIMIT_MAX_TOKENS);
 
-    // 3. Put the job in the queue
+    // 3. Is there room in the queue? If not, say "busy" right away instead of making people wait forever
+    if state.pending.fetch_add(1, Ordering::SeqCst) >= MAX_PENDING {
+        state.pending.fetch_sub(1, Ordering::SeqCst);
+        return error(StatusCode::TOO_MANY_REQUESTS, "kinSin is busy right now, please try again in a moment");
+    }
+
+    // 4. Put the job in the queue
     let (reply_to, pieces) = tokio::sync::mpsc::unbounded_channel();
-    let job = Job { prompt: build_prompt(&history), opts, max_tokens, reply_to };
+    let job = Job { history, opts, max_tokens, reply_to };
     if state.queue.send(job).is_err() {
+        state.pending.fetch_sub(1, Ordering::SeqCst);
         return error(StatusCode::SERVICE_UNAVAILABLE, "model worker stopped");
     }
 
-    // 4. Answer: streamed, or all at once
+    // 5. Answer: streamed, or all at once
     if request.stream {
         stream_reply(pieces, state.model_name)
     } else {
@@ -163,7 +225,7 @@ fn stream_reply(pieces: tokio::sync::mpsc::UnboundedReceiver<Piece>, model: Stri
             Piece::Done(stats) => json!({
                 "object": "chat.completion.chunk",
                 "model": model,
-                "choices": [{ "index": 0, "delta": {}, "finish_reason": "stop" }],
+                "choices": [{ "index": 0, "delta": {}, "finish_reason": stats.finish_reason.as_str() }],
                 "usage": usage(&stats)
             })
             .to_string(),
@@ -189,7 +251,7 @@ async fn full_reply(mut pieces: tokio::sync::mpsc::UnboundedReceiver<Piece>, mod
                     "choices": [{
                         "index": 0,
                         "message": { "role": "assistant", "content": content },
-                        "finish_reason": "stop"
+                        "finish_reason": stats.finish_reason.as_str()
                     }],
                     "usage": usage(&stats)
                 }))
@@ -218,11 +280,51 @@ fn error(status: StatusCode, message: &str) -> Response {
 mod tests {
     use super::*;
 
+    fn request(role: &str, content: &str) -> ChatRequest {
+        ChatRequest {
+            messages: vec![ChatMessage { role: role.to_string(), content: content.to_string() }],
+            stream: false,
+            temperature: None,
+            top_k: None,
+            max_tokens: None,
+        }
+    }
+
+    fn state_with_pending(n: usize) -> AppState {
+        let (queue, _jobs) = mpsc::channel();
+        AppState { queue, pending: Arc::new(AtomicUsize::new(n)), model_name: "test".to_string() }
+    }
+
+    #[tokio::test]
+    async fn full_queue_answers_429() {
+        let response = chat_completions(State(state_with_pending(MAX_PENDING)), Json(request("user", "hi"))).await;
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn unknown_role_answers_400() {
+        let response = chat_completions(State(state_with_pending(0)), Json(request("admin", "hi"))).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn too_long_message_answers_400() {
+        let long = "x".repeat(MAX_MESSAGE_CHARS + 1);
+        let response = chat_completions(State(state_with_pending(0)), Json(request("user", &long))).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
     #[tokio::test]
     async fn stream_sends_text_then_stats_then_done() {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         tx.send(Piece::Text("Hello".to_string())).unwrap();
-        tx.send(Piece::Done(Stats { prompt_tokens: 3, generated_tokens: 1, tokens_per_sec: 20.0 })).unwrap();
+        tx.send(Piece::Done(Stats {
+            prompt_tokens: 3,
+            generated_tokens: 1,
+            tokens_per_sec: 20.0,
+            finish_reason: crate::engine::FinishReason::Stop,
+        }))
+        .unwrap();
         drop(tx); // the worker is finished
 
         let response = stream_reply(rx, "test-model".to_string());

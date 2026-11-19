@@ -3,6 +3,7 @@
 //!   cargo run --release -- --serve              start the HTTP server on port 8080
 //!   cargo run --release -- --serve --port 3001  another port
 //!   cargo run --release -- --model models/other-model.gguf
+//!   cargo run --release -- --context 8192      allow longer conversations
 
 mod chat;
 mod engine;
@@ -13,7 +14,7 @@ use std::io::Write;
 
 use anyhow::Result;
 
-use chat::{Message, Role, build_prompt};
+use chat::{Message, Role, build_prompt_within};
 use engine::Engine;
 use sampler::SamplingOptions;
 
@@ -23,6 +24,7 @@ fn main() -> Result<()> {
     let mut tokenizer_path = "models/tokenizer.json".to_string();
     let mut serve = false;
     let mut port: u16 = 8080;
+    let mut context: usize = 4096;
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -41,6 +43,10 @@ fn main() -> Result<()> {
                 port = args[i + 1].parse()?;
                 i += 1;
             }
+            "--context" if i + 1 < args.len() => {
+                context = args[i + 1].parse()?;
+                i += 1;
+            }
             other => anyhow::bail!("unknown option: {other}"),
         }
         i += 1;
@@ -48,7 +54,7 @@ fn main() -> Result<()> {
 
     println!("AVX enabled: {}", candle_core::utils::with_avx());
     println!("Loading {} ...", model_path);
-    let mut engine = Engine::load(&model_path, &tokenizer_path)?;
+    let mut engine = Engine::load(&model_path, &tokenizer_path, context)?;
 
     if serve {
         // Start the async runtime and run the server until Ctrl+C
@@ -57,6 +63,7 @@ fn main() -> Result<()> {
     }
 
     let opts = SamplingOptions::default();
+    let max_reply_tokens = 500.min(context / 2);
 
     let mut history: Vec<Message> = Vec::new();
     println!("Chat started. Type /reset to forget the conversation, /exit to quit.\n");
@@ -82,17 +89,28 @@ fn main() -> Result<()> {
         }
 
         history.push(Message { role: Role::User, text: input.to_string() });
-        let prompt = build_prompt(&history);
+        // Keep only as much history as fits, leaving room for the reply
+        let prompt = match build_prompt_within(&history, context - max_reply_tokens, |t| engine.count_tokens(t)) {
+            Ok(prompt) => prompt,
+            Err(e) => {
+                println!("error: {e}\n");
+                history.pop(); // forget the message that didn't fit
+                continue;
+            }
+        };
 
         print!("bot › ");
-        let (reply, stats) = engine.generate(&prompt, &opts, 500, |piece| {
+        let (reply, stats) = engine.generate(&prompt, &opts, max_reply_tokens, |piece| {
             print!("{}", piece);
             let _ = std::io::stdout().flush();
             true // keep going
         })?;
         println!(
-            "\n[{} prompt tokens | {} new tokens @ {:.1} tok/s]\n",
-            stats.prompt_tokens, stats.generated_tokens, stats.tokens_per_sec
+            "\n[{} prompt tokens | {} new tokens @ {:.1} tok/s | {}]\n",
+            stats.prompt_tokens,
+            stats.generated_tokens,
+            stats.tokens_per_sec,
+            stats.finish_reason.as_str()
         );
 
         history.push(Message { role: Role::Assistant, text: reply });
