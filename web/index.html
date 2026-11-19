@@ -53,6 +53,7 @@
   body {
     background: var(--bg); color: var(--ink); font: 16px/1.6 var(--sans);
     display: flex;
+    height: 100dvh;   /* phones: stays put when the address bar shows/hides (100% above is the fallback) */
   }
   /* The chat area (header, messages, input) to the right of the sidebar */
   .app { flex: 1; min-width: 0; display: flex; flex-direction: column; }
@@ -158,7 +159,7 @@
   @keyframes blink { 50% { opacity: 0; } }
   @media (prefers-reduced-motion: reduce) { .cursor { animation: none; } }
 
-  footer { border-top: 1px solid var(--line); background: var(--bg); }
+  footer { border-top: 1px solid var(--line); background: var(--bg); padding-bottom: env(safe-area-inset-bottom); }
   form { max-width: 760px; margin: 0 auto; padding: 14px 20px 10px; display: flex; gap: 10px; align-items: flex-end; }
   textarea {
     flex: 1; resize: none; max-height: 180px; min-height: 48px;
@@ -231,6 +232,40 @@
     .chat-actions { opacity: 1; }
   }
   @media (prefers-reduced-motion: reduce) { .sidebar { transition: none !important; } }
+
+  /* Edit / regenerate / retry */
+  .msg-actions { margin-top: 4px; line-height: 1.4; }
+  .edit-msg, .regen-btn, .retry-btn {
+    background: none; border: 0; padding: 0; cursor: pointer;
+    font: 12px var(--mono); color: var(--muted); text-decoration: underline;
+  }
+  .edit-msg:hover, .regen-btn:hover, .retry-btn:hover { color: var(--accent); }
+  .meta .copy-reply + .regen-btn, .meta .stats:not(:empty) + .retry-btn { margin-left: 10px; }
+  .msg.user .msg-actions { visibility: hidden; }
+  .msg.user:hover .msg-actions, .msg.user:focus-within .msg-actions { visibility: visible; }
+  @media (hover: none) { .msg.user .msg-actions { visibility: visible; } }
+  .app.busy .edit-msg, .app.busy .regen-btn, .app.busy .retry-btn { display: none; }
+  .msg.pending .body { color: var(--muted); }
+  .msg.editing > .body, .msg.editing > .msg-actions { display: none; }
+  .edit-box { display: flex; flex-direction: column; gap: 8px; }
+  textarea.edit-input { flex: none; width: 100%; min-height: 80px; max-height: 320px; resize: vertical; }
+  .edit-buttons { display: flex; justify-content: flex-end; gap: 8px; }
+  .edit-buttons button {
+    height: 34px; padding: 0 14px; border-radius: 10px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--paper); color: var(--ink); font: 600 13px var(--sans);
+  }
+  .edit-buttons button:hover { border-color: var(--accent); }
+  .edit-buttons .edit-save { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .app.busy .edit-save { opacity: 0.5; cursor: default; }
+
+  /* Phones */
+  @media (max-width: 520px) {
+    header { padding: 10px 14px; }
+    #status { display: none; }          /* keep just the green dot */
+    .thread { padding: 18px 14px 8px; }
+    form { padding: 10px 14px 8px; }
+    .codeblock pre { font-size: 12.5px; }
+  }
 </style>
 </head>
 <body>
@@ -371,6 +406,9 @@ fetch('/v1/models')
   .catch(() => { document.getElementById('status').textContent = 'server offline'; });
 
 // --- Helpers ---
+const appEl = document.querySelector('.app');
+const isTouch = matchMedia('(hover: none)');   // phones/tablets: no hover, on-screen keyboard
+
 function addMessage(role, text) {
   empty.style.display = 'none';
   const el = document.createElement('div');
@@ -379,6 +417,7 @@ function addMessage(role, text) {
   const body = el.querySelector('.body');
   body.textContent = text;
   if (role === 'assistant') body.classList.add('md');
+  if (role === 'user') el.insertAdjacentHTML('beforeend', '<div class="msg-actions"><button type="button" class="edit-msg">edit</button></div>');
   thread.appendChild(el);
   scrollDown();
   return el;
@@ -387,21 +426,72 @@ function scrollDown() { scroller.scrollTop = scroller.scrollHeight; }
 function setBusy(busy) {
   sendBtn.textContent = busy ? 'Stop' : 'Send';
   sendBtn.classList.toggle('stop', busy);
+  appEl.classList.toggle('busy', busy);   // hides edit / regenerate / retry while a reply streams
+  if (!busy) refreshRegenerate();
+}
+// Focus the input, except on touch screens (it would pop up the keyboard)
+function focusInput() { if (!isTouch.matches) input.focus(); }
+
+// Draw every message of the open chat. data-index = position in chat.messages.
+function renderThread() {
+  const chat = current;
+  thread.querySelectorAll('.msg').forEach(m => m.remove());
+  empty.style.display = chat.messages.length ? 'none' : '';
+  chat.messages.forEach((m, i) => {
+    const el = addMessage(m.role, m.role === 'user' ? m.content : '');
+    el.dataset.index = i;
+    if (m.role === 'assistant') {
+      el.querySelector('.body').innerHTML = renderMarkdown(m.content);
+      if (m.meta) meta(el, m.meta);
+      addReplyCopy(el, m.content);
+    }
+  });
+  // The last question never got an answer (e.g. the server failed earlier): offer a retry
+  if (chat.messages.at(-1)?.role === 'user' && !controller) {
+    const el = addMessage('assistant', 'No reply yet.');
+    el.classList.add('pending');
+    addRetry(el);
+  }
+  refreshRegenerate();
+  scrollDown();
 }
 
-// --- Send a message and stream the reply ---
+// "regenerate" goes on the last assistant message only (and never while a reply streams)
+function refreshRegenerate() {
+  thread.querySelectorAll('.regen-btn').forEach(b => b.remove());
+  if (controller) return;
+  const last = current.messages.length - 1;
+  if (current.messages[last]?.role !== 'assistant') return;
+  const el = thread.querySelector(`.msg.assistant[data-index="${last}"]`);
+  if (el) metaLine(el).insertAdjacentHTML('beforeend', '<button type="button" class="regen-btn">regenerate</button>');
+}
+function addRetry(el) {
+  metaLine(el).insertAdjacentHTML('beforeend', '<button type="button" class="retry-btn">retry</button>');
+}
+
+// --- Send a message, then stream the reply ---
 async function send(text) {
-  const chat = current;                         // the reply is saved here even if the user switches away
+  const chat = current;
   if (!chat.messages.length) chat.title = autoTitle(text);
   chat.messages.push({ role: 'user', content: text });
   chat.updated = Date.now();
   if (!chats.includes(chat)) chats.push(chat);
   saveChats();
   renderChatList();
+  const el = addMessage('user', text);
+  el.dataset.index = chat.messages.length - 1;
+  return generate(chat, { fromSend: true });
+}
+
+// Ask the server to answer chat.messages and stream the reply into a new assistant message.
+// The result is saved to `chat`, even if the user has switched to another chat meanwhile.
+async function generate(chat, { fromSend = false } = {}) {
+  if (controller) return;                       // never two replies at once
+  if (chat === current) thread.querySelectorAll('.msg.pending, .msg.error').forEach(m => m.remove());
   const messages = chat.messages.map(({ role, content }) => ({ role, content }));   // never send meta
-  addMessage('user', text);
 
   const bot = addMessage('assistant', '');
+  bot.dataset.index = chat.messages.length;
   const body = bot.querySelector('.body');
   const cursor = document.createElement('span');
   cursor.className = 'cursor';
@@ -411,6 +501,8 @@ async function send(text) {
   setBusy(true);
   let reply = '';
   let metaText = '';
+  let aborted = false;
+  let failure = '';
   const started = performance.now();
 
   try {
@@ -454,35 +546,51 @@ async function send(text) {
     }
   } catch (err) {
     if (err.name === 'AbortError') {
+      aborted = true;
       metaText = 'stopped';
       meta(bot, metaText);
     } else if (reply) {
       metaText = 'Error: ' + err.message;
       meta(bot, metaText);   // keep the text that already arrived
     } else {
-      bot.classList.add('error');
-      body.textContent = 'Error: ' + err.message;
+      failure = err.message || 'request failed';
     }
   } finally {
     cursor.remove();
+    // Hand back the Send button first (unless a newer reply already took it)
+    const mine = controller === myController;
+    if (mine) controller = null;
+    const shown = chat === current;
+
     if (reply) {
+      // Finished, stopped or failed part-way: keep what arrived, so it can be regenerated
       addReplyCopy(bot, reply);
       chat.messages.push({ role: 'assistant', content: reply, meta: metaText });
       chat.updated = Date.now();
-    } else {
-      // Nothing came back: forget the question too, and the chat if that leaves it empty
-      if (chat.messages.at(-1)?.role === 'user') chat.messages.pop();
+      if (shown && !bot.isConnected) renderThread();   // switched away and back mid-reply
+    } else if (aborted) {
+      // Stopped before any text: drop the empty bubble, and the question too if it was just sent
+      bot.remove();
+      if (fromSend && chat.messages.at(-1)?.role === 'user') chat.messages.pop();
       if (!chat.messages.length) chats = chats.filter(c => c !== chat);
+      if (shown) renderThread();
+    } else {
+      // Failed with no text: show the error with a retry button. The error itself is not saved.
+      if (bot.isConnected) {
+        bot.classList.add('error');
+        body.textContent = 'Error: ' + failure;
+        addRetry(bot);
+      } else if (shown) {
+        renderThread();
+      }
     }
     saveChats();
     renderChatList();
-    // Switched away and back to this chat mid-reply: redraw it so the saved reply shows
-    if (chat === current && !bot.isConnected) showChat(chat);
-    // Only reset the Send button if a newer reply hasn't already started
-    if (controller === myController) {
-      controller = null;
+    if (mine) {
       setBusy(false);
-      input.focus();
+      focusInput();
+    } else if (shown) {
+      refreshRegenerate();
     }
   }
 }
@@ -495,24 +603,77 @@ function stopReply() {
   setBusy(false);
 }
 
+// --- Edit, regenerate, retry (one listener for the whole thread) ---
+function regenerate() {
+  const chat = current;
+  if (controller || chat.messages.at(-1)?.role !== 'assistant') return;
+  chat.messages.pop();                          // drop the last answer, ask again with the same conversation
+  saveChats();
+  renderThread();
+  generate(chat);
+}
+
+function startEdit(msgEl) {
+  if (controller || msgEl.classList.contains('editing')) return;
+  const chat = current;
+  const i = Number(msgEl.dataset.index);
+  const original = chat.messages[i]?.content;
+  if (typeof original !== 'string') return;
+
+  msgEl.classList.add('editing');               // CSS hides the bubble and the edit link
+  const box = document.createElement('div');
+  box.className = 'edit-box';
+  box.innerHTML =
+    '<textarea class="edit-input" rows="3" aria-label="Edit message"></textarea>' +
+    '<div class="edit-buttons">' +
+    '<button type="button" class="edit-cancel">Cancel</button>' +
+    '<button type="button" class="edit-save">Save &amp; send</button>' +
+    '</div>';
+  const ta = box.querySelector('textarea');
+  ta.value = original;
+  msgEl.appendChild(box);
+  const fit = () => { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight + 2, 320) + 'px'; };
+  fit();
+  ta.addEventListener('input', fit);
+  ta.focus();
+  ta.setSelectionRange(ta.value.length, ta.value.length);
+
+  const close = () => { box.remove(); msgEl.classList.remove('editing'); };
+  const save = () => {
+    if (controller) return;
+    const text = ta.value.trim();
+    if (!text) return;                          // empty: do nothing
+    if (text === original) { close(); return; } // unchanged: just close
+    chat.messages[i] = { role: 'user', content: text };
+    chat.messages.length = i + 1;               // like ChatGPT: everything after the edited message goes
+    chat.updated = Date.now();
+    saveChats();
+    renderChatList();
+    renderThread();
+    generate(chat);
+  };
+  box.querySelector('.edit-cancel').addEventListener('click', close);
+  box.querySelector('.edit-save').addEventListener('click', save);
+  ta.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); }
+    else if (e.key === 'Enter' && !e.shiftKey && !isTouch.matches) { e.preventDefault(); save(); }
+  });
+}
+
+thread.addEventListener('click', e => {
+  const btn = e.target.closest('.edit-msg, .regen-btn, .retry-btn');
+  if (!btn || controller) return;
+  const msgEl = btn.closest('.msg');
+  if (btn.classList.contains('edit-msg')) startEdit(msgEl);
+  else if (btn.classList.contains('regen-btn')) regenerate();
+  else { msgEl.remove(); generate(current); }   // retry: drop the error bubble, ask again
+});
+
 // --- Sidebar: open, new, rename, delete ---
 const chatList = document.getElementById('chat-list');
 const ICON = d => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${d}"/></svg>`;
 const PENCIL = ICON('M17 3a2.85 2.85 0 0 1 4 4L7.5 20.5 2 22l1.5-5.5Z');
 const TRASH = ICON('M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6');
-
-function showChat(chat) {
-  thread.querySelectorAll('.msg').forEach(m => m.remove());
-  empty.style.display = chat.messages.length ? 'none' : '';
-  for (const m of chat.messages) {
-    if (m.role === 'user') { addMessage('user', m.content); continue; }
-    const el = addMessage('assistant', '');
-    el.querySelector('.body').innerHTML = renderMarkdown(m.content);
-    if (m.meta) meta(el, m.meta);
-    addReplyCopy(el, m.content);
-  }
-  scrollDown();
-}
 
 function groupOf(ts) {
   const today = new Date(); today.setHours(0, 0, 0, 0);
@@ -554,9 +715,9 @@ function renderChatList() {
 function newChat() {
   stopReply();
   current = blankChat();
-  showChat(current);
+  renderThread();
   renderChatList();
-  input.focus();
+  focusInput();
 }
 function openChat(id) {
   const chat = chats.find(c => c.id === id);
@@ -564,7 +725,7 @@ function openChat(id) {
   if (chat !== current) {
     stopReply();
     current = chat;
-    showChat(chat);
+    renderThread();
     renderChatList();
   }
   closeSidebar();
@@ -900,7 +1061,7 @@ form.addEventListener('submit', e => {
   send(text);
 });
 input.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); }
+  if (e.key === 'Enter' && !e.shiftKey && !isTouch.matches) { e.preventDefault(); form.requestSubmit(); }
 });
 function autosize() { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 180) + 'px'; }
 input.addEventListener('input', autosize);
