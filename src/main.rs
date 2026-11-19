@@ -4,18 +4,22 @@
 //!   cargo run --release -- --serve --port 3001  another port
 //!   cargo run --release -- --model models/other-model.gguf
 //!   cargo run --release -- --context 8192      allow longer conversations
+//!   cargo run --release -- --serve --ocr-models models/ocr   where the photo-reading models are
 
 mod chat;
 mod engine;
+mod ocr;
 mod sampler;
 mod server;
 
 use std::io::Write;
+use std::path::Path;
 
 use anyhow::Result;
 
 use chat::{Message, Role, build_prompt_within};
 use engine::Engine;
+use ocr::Ocr;
 use sampler::SamplingOptions;
 
 fn main() -> Result<()> {
@@ -25,6 +29,7 @@ fn main() -> Result<()> {
     let mut serve = false;
     let mut port: u16 = 8080;
     let mut context: usize = 4096;
+    let mut ocr_models = "models/ocr".to_string();
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -47,6 +52,10 @@ fn main() -> Result<()> {
                 context = args[i + 1].parse()?;
                 i += 1;
             }
+            "--ocr-models" if i + 1 < args.len() => {
+                ocr_models = args[i + 1].clone();
+                i += 1;
+            }
             other => anyhow::bail!("unknown option: {other}"),
         }
         i += 1;
@@ -57,9 +66,10 @@ fn main() -> Result<()> {
     let mut engine = Engine::load(&model_path, &tokenizer_path, context)?;
 
     if serve {
+        let ocr = load_ocr(Path::new(&ocr_models));
         // Start the async runtime and run the server until Ctrl+C
         let runtime = tokio::runtime::Runtime::new()?;
-        return runtime.block_on(server::serve(engine, model_path, port));
+        return runtime.block_on(server::serve(engine, model_path, port, ocr));
     }
 
     let opts = SamplingOptions::default();
@@ -117,4 +127,23 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Photo reading is optional: without the OCR models the server still runs, just without it.
+fn load_ocr(dir: &Path) -> Option<Ocr> {
+    let shown = dir.display();
+    if !Ocr::models_present(dir) {
+        println!("Photo reading: off (put text-detection.onnx and text-recognition.onnx in {shown})");
+        return None;
+    }
+    match Ocr::load(dir) {
+        Ok(ocr) => {
+            println!("Photo reading: on ({shown})");
+            Some(ocr)
+        }
+        Err(e) => {
+            println!("Photo reading: off ({e:#})");
+            None
+        }
+    }
 }

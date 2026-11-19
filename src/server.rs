@@ -4,6 +4,7 @@
 //!   GET  /health                -> "ok"
 //!   GET  /v1/models             -> which model is loaded
 //!   POST /v1/chat/completions   -> a reply, streamed or all at once
+//!   POST /v1/ocr                -> the text in a photo (body = the image bytes)
 //!
 //! The model can only work on one request at a time on a CPU, so requests
 //! wait in a queue and a single worker thread answers them in order.
@@ -12,6 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
+use axum::body::Bytes;
 use axum::extract::DefaultBodyLimit;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -27,6 +29,7 @@ use tower_http::cors::CorsLayer;
 
 use crate::chat::{Message, Role, build_prompt_within};
 use crate::engine::{Engine, Stats};
+use crate::ocr::Ocr;
 use crate::sampler::SamplingOptions;
 
 // ---------- Limits that keep the server healthy ----------
@@ -35,6 +38,8 @@ use crate::sampler::SamplingOptions;
 const MAX_PENDING: usize = 8;
 /// Largest request body accepted, in bytes.
 const MAX_BODY_BYTES: usize = 64 * 1024;
+/// Largest photo accepted by /v1/ocr, in bytes.
+const MAX_PHOTO_BYTES: usize = 12 * 1024 * 1024;
 /// Most messages in one conversation.
 const MAX_MESSAGES: usize = 200;
 /// Longest single message, in characters.
@@ -89,6 +94,10 @@ struct AppState {
     /// How many requests are waiting or being answered right now.
     pending: Arc<AtomicUsize>,
     model_name: String,
+    /// Photo reading; None when the OCR models are missing.
+    ocr: Option<Arc<Ocr>>,
+    /// One photo at a time: OCR uses a lot of CPU.
+    ocr_slot: Arc<tokio::sync::Semaphore>,
 }
 
 /// The worker: owns the engine and answers jobs one by one, forever.
@@ -127,21 +136,20 @@ fn answer(engine: &mut Engine, job: Job) {
 
 // ---------- Starting the server ----------
 
-pub async fn serve(engine: Engine, model_name: String, port: u16) -> anyhow::Result<()> {
+pub async fn serve(engine: Engine, model_name: String, port: u16, ocr: Option<Ocr>) -> anyhow::Result<()> {
     let (queue, jobs) = mpsc::channel::<Job>();
     let pending = Arc::new(AtomicUsize::new(0));
     let worker_pending = pending.clone();
     std::thread::spawn(move || run_worker(engine, jobs, worker_pending));
 
-    let state = AppState { queue, pending, model_name };
-    let app = Router::new()
-        .route("/", get(|| async { Html(include_str!("../web/index.html")) }))
-        .route("/health", get(|| async { "ok" }))
-        .route("/v1/models", get(list_models))
-        .route("/v1/chat/completions", post(chat_completions))
-        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES)) // reject huge requests early
-        .layer(CorsLayer::permissive()) // allow a website on another port to call us
-        .with_state(state);
+    let state = AppState {
+        queue,
+        pending,
+        model_name,
+        ocr: ocr.map(Arc::new),
+        ocr_slot: Arc::new(tokio::sync::Semaphore::new(1)),
+    };
+    let app = app(state);
 
     let address = format!("0.0.0.0:{port}");
     let listener = tokio::net::TcpListener::bind(&address).await?;
@@ -150,13 +158,60 @@ pub async fn serve(engine: Engine, model_name: String, port: u16) -> anyhow::Res
     Ok(())
 }
 
+fn app(state: AppState) -> Router {
+    Router::new()
+        .route("/", get(|| async { Html(include_str!("../web/index.html")) }))
+        .route("/health", get(|| async { "ok" }))
+        .route("/v1/models", get(list_models))
+        .route("/v1/chat/completions", post(chat_completions))
+        // Photos are bigger than chat messages: only this route gets a larger limit
+        .route("/v1/ocr", post(read_photo).layer(DefaultBodyLimit::max(MAX_PHOTO_BYTES)))
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES)) // reject huge requests early
+        .layer(CorsLayer::permissive()) // allow a website on another port to call us
+        .with_state(state)
+}
+
 // ---------- GET /v1/models ----------
 
 async fn list_models(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(json!({
         "object": "list",
-        "data": [{ "id": state.model_name, "object": "model", "owned_by": "rustllm" }]
+        "data": [{ "id": state.model_name, "object": "model", "owned_by": "rustllm" }],
+        "kinsin": { "ocr": state.ocr.is_some() }
     }))
+}
+
+// ---------- POST /v1/ocr ----------
+
+async fn read_photo(State(state): State<AppState>, body: Bytes) -> Response {
+    let Some(ocr) = state.ocr.clone() else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "photo reading is not set up on this server (OCR models missing)");
+    };
+    if body.is_empty() {
+        return error(StatusCode::BAD_REQUEST, "send the photo as the request body");
+    }
+    // Wait for our turn: one photo at a time
+    let Ok(permit) = state.ocr_slot.clone().acquire_owned().await else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "photo reading stopped");
+    };
+    let started = Instant::now();
+    // OCR is heavy CPU work: run it on a blocking thread, not on the async runtime.
+    // The permit moves in too, so the slot stays taken until OCR really ends (even if the client leaves).
+    let result = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        ocr.read_text(&body)
+    })
+    .await;
+    match result {
+        Ok(Ok(text)) => Json(json!({
+            "text": text,
+            "chars": text.chars().count(),
+            "ms": started.elapsed().as_millis() as u64
+        }))
+        .into_response(),
+        Ok(Err(e)) => error(StatusCode::BAD_REQUEST, &e.to_string()),
+        Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "photo reading crashed"),
+    }
 }
 
 // ---------- POST /v1/chat/completions ----------
@@ -292,7 +347,13 @@ mod tests {
 
     fn state_with_pending(n: usize) -> AppState {
         let (queue, _jobs) = mpsc::channel();
-        AppState { queue, pending: Arc::new(AtomicUsize::new(n)), model_name: "test".to_string() }
+        AppState {
+            queue,
+            pending: Arc::new(AtomicUsize::new(n)),
+            model_name: "test".to_string(),
+            ocr: None,
+            ocr_slot: Arc::new(tokio::sync::Semaphore::new(1)),
+        }
     }
 
     #[tokio::test]
@@ -336,5 +397,37 @@ mod tests {
         assert!(events[0].contains(r#""content":"Hello""#));
         assert!(events[1].contains(r#""finish_reason":"stop""#));
         assert_eq!(events[2], "data: [DONE]");
+    }
+
+    #[tokio::test]
+    async fn photo_without_ocr_models_answers_503() {
+        let response = read_photo(State(state_with_pending(0)), Bytes::from_static(b"some photo bytes")).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn models_say_whether_photo_reading_is_on() {
+        let Json(body) = list_models(State(state_with_pending(0))).await;
+        assert_eq!(body["kinsin"]["ocr"], false);
+    }
+
+    /// Send a POST with a body of `size` bytes through the real router; return the status.
+    async fn post_size(path: &str, size: usize) -> StatusCode {
+        use tower::ServiceExt;
+        let request = axum::http::Request::post(path)
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(vec![b' '; size]))
+            .unwrap();
+        app(state_with_pending(0)).oneshot(request).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn photo_route_accepts_big_bodies_but_others_keep_64kb_limit() {
+        // A 5 MB photo gets past the size limit (and then hits "no OCR models" = 503)
+        assert_eq!(post_size("/v1/ocr", 5 * 1024 * 1024).await, StatusCode::SERVICE_UNAVAILABLE);
+        // Over 12 MB is refused
+        assert_eq!(post_size("/v1/ocr", MAX_PHOTO_BYTES + 1).await, StatusCode::PAYLOAD_TOO_LARGE);
+        // Chat requests still stop at 64 KB
+        assert_eq!(post_size("/v1/chat/completions", MAX_BODY_BYTES + 1).await, StatusCode::PAYLOAD_TOO_LARGE);
     }
 }

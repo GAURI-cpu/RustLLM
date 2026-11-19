@@ -247,6 +247,45 @@
   .app.busy .edit-msg, .app.busy .regen-btn, .app.busy .retry-btn { display: none; }
   .msg.pending .body { color: var(--muted); }
   .msg.editing > .body, .msg.editing > .msg-actions { display: none; }
+
+  /* Photos: button, preview chip, drag-and-drop, and photos in messages */
+  .photo-btn {
+    flex-shrink: 0; width: 48px; height: 48px; padding: 0; border-radius: 14px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--paper); border: 1px solid var(--line); color: var(--ink);
+  }
+  .photo-btn[hidden] { display: none; }
+  .photo-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .photo-btn svg { width: 20px; height: 20px; }
+  .attach { max-width: 760px; margin: 0 auto; padding: 10px 20px 0; }
+  .attach[hidden] { display: none; }
+  .photo-chip {
+    display: flex; align-items: center; gap: 10px; max-width: 100%; width: fit-content;
+    padding: 6px 6px 6px 6px; background: var(--paper); border: 1px solid var(--line); border-radius: 12px;
+  }
+  .photo-chip img { width: 44px; height: 44px; object-fit: cover; border-radius: 8px; flex-shrink: 0; background: var(--line); }
+  .photo-chip .info { min-width: 0; flex: 1; line-height: 1.35; }
+  .photo-chip .name { font: 600 13px var(--sans); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .photo-chip .state { font: 12px var(--mono); color: var(--muted); }
+  .photo-chip .state.err { color: #b3261e; }
+  .photo-remove {
+    flex-shrink: 0; width: 30px; height: 30px; padding: 0; border: 0; border-radius: 8px; cursor: pointer;
+    background: none; color: var(--muted); font: 20px/1 var(--sans);
+  }
+  .photo-remove:hover { color: var(--accent); background: var(--bg); }
+  .app.dragging { outline: 2px dashed var(--accent); outline-offset: -8px; }
+  .msg-photo {
+    display: block; max-width: min(260px, 100%); max-height: 260px; margin-bottom: 6px;
+    border-radius: 12px; border: 1px solid var(--line);
+  }
+  .ocr-details { margin-top: 6px; font: 12px var(--mono); color: var(--muted); }
+  .ocr-details summary { cursor: pointer; }
+  .ocr-details pre {
+    margin: 6px 0 0; padding: 10px 12px; max-height: 240px; overflow: auto;
+    white-space: pre-wrap; word-break: break-word; font: 12.5px/1.5 var(--mono); color: var(--ink);
+    background: var(--paper); border: 1px solid var(--line); border-radius: 10px;
+  }
+  @media (max-width: 520px) { .attach { padding: 8px 14px 0; } }
   .edit-box { display: flex; flex-direction: column; gap: 8px; }
   textarea.edit-input { flex: none; width: 100%; min-height: 80px; max-height: 320px; resize: vertical; }
   .edit-buttons { display: flex; justify-content: flex-end; gap: 8px; }
@@ -318,7 +357,12 @@
   </main>
 
   <footer>
+    <div class="attach" id="attach" hidden></div>
     <form id="form">
+      <button class="photo-btn" id="photo-btn" type="button" aria-label="Add a photo" title="Add a photo (or paste / drop one)" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/></svg>
+      </button>
+      <input type="file" id="photo-input" accept="image/*" hidden>
       <textarea id="input" rows="1" placeholder="Ask anything…" autofocus></textarea>
       <button class="send" id="send" type="submit">Send</button>
     </form>
@@ -382,7 +426,7 @@ function loadChats() {
           .filter(m => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
           .map(m => m.role === 'assistant'
             ? { role: m.role, content: m.content, meta: typeof m.meta === 'string' ? m.meta : '' }
-            : { role: m.role, content: m.content }),
+            : userMessageFrom(m)),
       }))
       .filter(c => c.messages.length);
   } catch { return []; }   // blocked or corrupt storage: start with no history
@@ -402,6 +446,8 @@ fetch('/v1/models')
     const name = d.data[0].id.split(/[\\/]/).pop().replace('.gguf', '');
     document.getElementById('status').textContent = name;
     document.getElementById('dot').classList.add('on');
+    ocrOn = d.kinsin?.ocr === true;
+    photoBtn.hidden = !ocrOn;
   })
   .catch(() => { document.getElementById('status').textContent = 'server offline'; });
 
@@ -438,13 +484,12 @@ function renderThread() {
   thread.querySelectorAll('.msg').forEach(m => m.remove());
   empty.style.display = chat.messages.length ? 'none' : '';
   chat.messages.forEach((m, i) => {
-    const el = addMessage(m.role, m.role === 'user' ? m.content : '');
+    if (m.role === 'user') { addUserMessage(m, i); return; }
+    const el = addMessage('assistant', '');
     el.dataset.index = i;
-    if (m.role === 'assistant') {
-      el.querySelector('.body').innerHTML = renderMarkdown(m.content);
-      if (m.meta) meta(el, m.meta);
-      addReplyCopy(el, m.content);
-    }
+    el.querySelector('.body').innerHTML = renderMarkdown(m.content);
+    if (m.meta) meta(el, m.meta);
+    addReplyCopy(el, m.content);
   });
   // The last question never got an answer (e.g. the server failed earlier): offer a retry
   if (chat.messages.at(-1)?.role === 'user' && !controller) {
@@ -470,16 +515,17 @@ function addRetry(el) {
 }
 
 // --- Send a message, then stream the reply ---
-async function send(text) {
+async function send(text, photo = null) {
   const chat = current;
-  if (!chat.messages.length) chat.title = autoTitle(text);
-  chat.messages.push({ role: 'user', content: text });
+  const question = text || (photo ? 'What does this photo say?' : '');
+  const msg = photo ? photoMessage(question, photo.thumb, photo.text) : { role: 'user', content: question };
+  if (!chat.messages.length) chat.title = autoTitle(photo ? '📷 ' + question : question);
+  chat.messages.push(msg);
   chat.updated = Date.now();
   if (!chats.includes(chat)) chats.push(chat);
   saveChats();
   renderChatList();
-  const el = addMessage('user', text);
-  el.dataset.index = chat.messages.length - 1;
+  addUserMessage(msg, chat.messages.length - 1);
   return generate(chat, { fromSend: true });
 }
 
@@ -617,7 +663,8 @@ function startEdit(msgEl) {
   if (controller || msgEl.classList.contains('editing')) return;
   const chat = current;
   const i = Number(msgEl.dataset.index);
-  const original = chat.messages[i]?.content;
+  const editedMsg = chat.messages[i];
+  const original = editedMsg?.display ?? editedMsg?.content;
   if (typeof original !== 'string') return;
 
   msgEl.classList.add('editing');               // CSS hides the bubble and the edit link
@@ -644,7 +691,9 @@ function startEdit(msgEl) {
     const text = ta.value.trim();
     if (!text) return;                          // empty: do nothing
     if (text === original) { close(); return; } // unchanged: just close
-    chat.messages[i] = { role: 'user', content: text };
+    chat.messages[i] = editedMsg.ocrText !== undefined
+      ? photoMessage(text, editedMsg.image, editedMsg.ocrText)   // photo + its text stay, content is rebuilt
+      : { role: 'user', content: text };
     chat.messages.length = i + 1;               // like ChatGPT: everything after the edited message goes
     chat.updated = Date.now();
     saveChats();
@@ -1050,15 +1099,191 @@ function emphasis(s) {
     .replace(/~~(?=\S)([\s\S]*?\S)~~/g, '<del>$1</del>');
 }
 
+// --- Photos: read the text in them (OCR on the server) ---
+const photoBtn = document.getElementById('photo-btn');
+const photoInput = document.getElementById('photo-input');
+const attachEl = document.getElementById('attach');
+const NOT_A_PHOTO = 'this file is not a photo kinSin can open (try JPG or PNG)';
+const MAX_OCR_CHARS = 8000;
+let ocrOn = false;     // the server has the OCR models
+let photo = null;      // the photo waiting to be sent: { name, thumb, text, error, reading, ready }
+
+// The message saved for a question about a photo. Only role + content go to the model.
+function photoMessage(question, image, ocrText) {
+  const text = ocrText.length > MAX_OCR_CHARS ? ocrText.slice(0, MAX_OCR_CHARS) + '\n…(the rest was cut off)' : ocrText;
+  return {
+    role: 'user',
+    content: 'I am sharing a photo. This is the text that was read from it:\n"""\n' + text + '\n"""\n\n' + question,
+    display: question,
+    image,
+    ocrText,
+  };
+}
+// A saved user message, keeping its photo fields (only a data: image is trusted as a picture)
+function userMessageFrom(m) {
+  const out = { role: 'user', content: m.content };
+  if (typeof m.ocrText === 'string') {
+    out.ocrText = m.ocrText;
+    out.display = typeof m.display === 'string' ? m.display : m.content;
+    if (typeof m.image === 'string' && m.image.startsWith('data:image/')) out.image = m.image;
+  }
+  return out;
+}
+
+// Draw a user message: the question, with the photo above it and the read text below it
+function addUserMessage(m, index) {
+  const el = addMessage('user', m.display ?? m.content);
+  el.dataset.index = index;
+  const body = el.querySelector('.body');
+  if (m.image) {
+    const img = document.createElement('img');
+    img.className = 'msg-photo';
+    img.alt = 'Photo you shared';
+    img.src = m.image;
+    body.before(img);
+  }
+  if (m.ocrText !== undefined) {
+    const details = document.createElement('details');
+    details.className = 'ocr-details';
+    details.innerHTML = '<summary>Text read from the photo</summary><pre></pre>';
+    details.querySelector('pre').textContent = m.ocrText;   // never innerHTML
+    body.after(details);
+  }
+  return el;
+}
+
+function loadImage(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error(NOT_A_PHOTO)); };
+    img.src = url;
+  });
+}
+// The image scaled so its longest side is at most `max`, on a white background (for transparent PNGs)
+function scaled(img, max) {
+  const w = img.naturalWidth, h = img.naturalHeight;
+  const k = Math.min(1, max / Math.max(w, h));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(w * k));
+  canvas.height = Math.max(1, Math.round(h * k));
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  return canvas;
+}
+
+// Add a photo: make a thumbnail, upload a copy, and read its text right away
+function addPhoto(file) {
+  if (!ocrOn || !file) return;
+  const p = { name: file.name || 'Pasted photo', thumb: '', text: '', error: '', reading: true };
+  photo = p;                                    // one photo at a time: replaces any earlier one
+  drawChip();
+  p.ready = (async () => {
+    try {
+      if (file.type && !file.type.startsWith('image/')) throw new Error(NOT_A_PHOTO);
+      const img = await loadImage(file);
+      p.thumb = scaled(img, 240).toDataURL('image/jpeg', 0.7);
+      if (photo === p) drawChip();
+      const blob = await new Promise(resolve => scaled(img, 2000).toBlob(resolve, 'image/jpeg', 0.9));
+      if (!blob) throw new Error(NOT_A_PHOTO);
+      const res = await fetch('/v1/ocr', { method: 'POST', headers: { 'Content-Type': 'image/jpeg' }, body: blob });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error?.message || res.statusText || 'could not read this photo');
+      const text = typeof data.text === 'string' ? data.text.trim() : '';
+      if (!text) throw new Error('No text found in this photo.');
+      p.text = text;
+    } catch (err) {
+      p.error = err.message || 'could not read this photo';
+    } finally {
+      p.reading = false;
+      if (photo === p) drawChip();
+    }
+  })();
+}
+
+// The preview chip above the input
+function drawChip() {
+  if (!photo) { attachEl.hidden = true; attachEl.textContent = ''; return; }
+  attachEl.hidden = false;
+  attachEl.innerHTML =
+    '<div class="photo-chip"><img alt=""><div class="info"><div class="name"></div><div class="state"></div></div>' +
+    '<button type="button" class="photo-remove" aria-label="Remove photo" title="Remove photo">×</button></div>';
+  const img = attachEl.querySelector('img');
+  if (photo.thumb) img.src = photo.thumb; else img.style.visibility = 'hidden';
+  attachEl.querySelector('.name').textContent = photo.name;
+  const state = attachEl.querySelector('.state');
+  state.textContent = photo.reading ? 'reading the text…'
+    : photo.error ? photo.error
+    : `${photo.text.length} characters read · ask anything about it`;
+  state.classList.toggle('err', !!photo.error);
+}
+attachEl.addEventListener('click', e => {
+  if (e.target.closest('.photo-remove')) { photo = null; drawChip(); focusInput(); }
+});
+
+photoBtn.addEventListener('click', () => photoInput.click());
+photoInput.addEventListener('change', () => {
+  addPhoto(photoInput.files[0]);
+  photoInput.value = '';                        // so the same file can be picked again
+});
+// Paste a photo (Ctrl+V anywhere)
+document.addEventListener('paste', e => {
+  if (!ocrOn) return;
+  const file = [...(e.clipboardData?.files || [])].find(f => f.type.startsWith('image/'));
+  if (file) { e.preventDefault(); addPhoto(file); }
+});
+// Drag and drop onto the chat area
+let dragDepth = 0;
+const isFileDrag = e => [...(e.dataTransfer?.types || [])].includes('Files');
+appEl.addEventListener('dragenter', e => {
+  if (!isFileDrag(e)) return;
+  e.preventDefault();
+  dragDepth++;
+  if (ocrOn) appEl.classList.add('dragging');
+});
+appEl.addEventListener('dragover', e => { if (isFileDrag(e)) e.preventDefault(); });
+appEl.addEventListener('dragleave', e => {
+  if (!isFileDrag(e)) return;
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (!dragDepth) appEl.classList.remove('dragging');
+});
+appEl.addEventListener('drop', e => {
+  if (!isFileDrag(e)) return;
+  e.preventDefault();                           // never let the browser open the file instead of the chat
+  dragDepth = 0;
+  appEl.classList.remove('dragging');
+  const file = [...e.dataTransfer.files].find(f => f.type.startsWith('image/')) || e.dataTransfer.files[0];
+  if (file) addPhoto(file);
+});
+
 // --- Input handling ---
-form.addEventListener('submit', e => {
+let waitingForPhoto = false;
+form.addEventListener('submit', async e => {
   e.preventDefault();
   if (controller) { controller.abort(); return; }   // button is "Stop" while generating
+  if (waitingForPhoto) return;
+  const p = photo;
+  if (!input.value.trim() && !p) return;
+  if (p && p.reading) {
+    // Still reading the photo: wait for it, then send
+    waitingForPhoto = true;
+    sendBtn.disabled = true;
+    await p.ready;
+    waitingForPhoto = false;
+    sendBtn.disabled = false;
+    if (photo !== p) return;                       // removed or replaced while waiting
+  }
+  if (p && p.error) return;                        // the chip says why
   const text = input.value.trim();
-  if (!text) return;
+  if (!text && !p) return;
   input.value = '';
   autosize();
-  send(text);
+  photo = null;
+  drawChip();
+  send(text, p);
 });
 input.addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey && !isTouch.matches) { e.preventDefault(); form.requestSubmit(); }
