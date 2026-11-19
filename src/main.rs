@@ -8,7 +8,6 @@ use candle_transformers::models::quantized_qwen2::ModelWeights;
 use tokenizers::Tokenizer;
 
 fn main() -> Result<()> {
-    // Load model + tokenizer (same as Step 4)
     println!("AVX enabled: {}", candle_core::utils::with_avx());
     let device = Device::Cpu;
     let mut file = std::fs::File::open("models/qwen2.5-0.5b-instruct-q4_k_m.gguf")?;
@@ -17,53 +16,112 @@ fn main() -> Result<()> {
     let tokenizer = Tokenizer::from_file("models/tokenizer.json").map_err(anyhow::Error::msg)?;
     let mut rng = Rng::from_time();
 
-    // Tokens that mean "I'm done"
     let stop_tokens: Vec<u32> = ["<|endoftext|>", "<|im_end|>"]
         .iter()
         .filter_map(|t| tokenizer.token_to_id(t))
         .collect();
 
-    // PREFILL: run the whole prompt once
-    let question = "What is Rust? Answer in two sentences.";
-    let prompt = format!(
-        "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n\
-         <|im_start|>user\n{}<|im_end|>\n\
-         <|im_start|>assistant\n",
-        question
-    );
-    let mut tokens = tokenizer.encode(prompt.as_str(), false).map_err(anyhow::Error::msg)?.get_ids().to_vec();
-    println!("you › {}", question);
-    print!("bot › ");
+    // The whole conversation so far: (role, text)
+    let mut history: Vec<(String, String)> = Vec::new();
 
-    let input = Tensor::new(tokens.as_slice(), &device)?.unsqueeze(0)?;
+    println!("Chat started. Type /reset to forget the conversation, /exit to quit.\n");
+
+    loop {
+        // 1. Read what the user types
+        print!("you › ");
+        std::io::stdout().flush()?;
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line)? == 0 {
+            break; // input closed
+        }
+        let input = line.trim();
+
+        // 2. Commands
+        if input.is_empty() {
+            continue;
+        }
+        if input == "/exit" {
+            break;
+        }
+        if input == "/reset" {
+            history.clear();
+            println!("(conversation cleared)\n");
+            continue;
+        }
+
+        // 3. Add the message to the conversation and build the full prompt
+        history.push(("user".to_string(), input.to_string()));
+        let prompt = build_prompt(&history);
+
+        // 4. Generate the reply
+        print!("bot › ");
+        let reply = generate(&mut model, &tokenizer, &device, &prompt, &stop_tokens, &mut rng)?;
+
+        // 5. Remember the reply too, so the next question has context
+        history.push(("assistant".to_string(), reply));
+    }
+
+    Ok(())
+}
+
+// Turn the conversation into ChatML text, ending with an open assistant turn
+fn build_prompt(history: &[(String, String)]) -> String {
+    let mut prompt = String::from("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n");
+    for (role, text) in history {
+        prompt.push_str(&format!("<|im_start|>{}\n{}<|im_end|>\n", role, text));
+    }
+    prompt.push_str("<|im_start|>assistant\n");
+    prompt
+}
+
+// Run prefill + decode for one reply; prints it live and returns the full text
+fn generate(
+    model: &mut ModelWeights,
+    tokenizer: &Tokenizer,
+    device: &Device,
+    prompt: &str,
+    stop_tokens: &[u32],
+    rng: &mut Rng,
+) -> Result<String> {
+    // New turn: forget the old KV cache, we re-read the whole conversation
+    model.clear_kv_cache();
+
+    let mut tokens = tokenizer.encode(prompt, false).map_err(anyhow::Error::msg)?.get_ids().to_vec();
+    let prompt_len = tokens.len();
+
+    // PREFILL
+    let input = Tensor::new(tokens.as_slice(), device)?.unsqueeze(0)?;
     let logits: Vec<f32> = model.forward(&input, 0)?.squeeze(0)?.to_vec1()?;
-    let mut next = sample(&logits, &tokens, 0.7, 40, 1.1, &mut rng);
+    let mut next = sample(&logits, &tokens, 0.7, 40, 1.1, rng);
 
-    // DECODE: one new token at a time
+    // DECODE
     let start = Instant::now();
-    let mut generated = 0;
-    for _ in 0..200 {
+    let mut reply = String::new();
+    for _ in 0..500 {
         if stop_tokens.contains(&next) {
             break;
         }
         tokens.push(next);
-        generated += 1;
 
-        // show the new word immediately
-        let word = tokenizer.decode(&[next], false).map_err(anyhow::Error::msg)?;
-        print!("{}", word);
-        std::io::stdout().flush()?;
+        // Clean streaming: decode everything generated so far, print only the new part.
+        // Skip printing while a character is still half-finished (shows as �).
+        let text = tokenizer.decode(&tokens[prompt_len..], false).map_err(anyhow::Error::msg)?;
+        if text.len() > reply.len() && !text.ends_with('\u{FFFD}') {
+            print!("{}", &text[reply.len()..]);
+            std::io::stdout().flush()?;
+            reply = text;
+        }
 
-        // feed ONLY the new token; the KV cache remembers the rest
-        let input = Tensor::new(&[next], &device)?.unsqueeze(0)?;
+        let input = Tensor::new(&[next], device)?.unsqueeze(0)?;
         let position = tokens.len() - 1;
         let logits: Vec<f32> = model.forward(&input, position)?.squeeze(0)?.to_vec1()?;
-        next = sample(&logits, &tokens, 0.7, 40, 1.1, &mut rng);
+        next = sample(&logits, &tokens, 0.7, 40, 1.1, rng);
     }
 
+    let generated = tokens.len() - prompt_len;
     let secs = start.elapsed().as_secs_f64();
-    println!("\n\n[{} tokens in {:.2}s = {:.1} tokens/sec]", generated, secs, generated as f64 / secs);
-    Ok(())
+    println!("\n[{} tokens, {:.1} tok/s]\n", generated, generated as f64 / secs);
+    Ok(reply)
 }
 
 // Return the position of the highest score = the most likely token id
