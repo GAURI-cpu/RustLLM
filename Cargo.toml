@@ -26,6 +26,7 @@ tokio = { version = "1.54.1", features = ["full"] }
 tokio-stream = "0.1.19"
 tower-http = { version = "0.7.1", features = ["cors"] }
 urlencoding = "2.1.3"
+kinsin-engine = { path = "engine" }
 
 # Optimisations matter a lot for inference speed.
 [profile.release]

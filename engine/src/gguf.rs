@@ -8,7 +8,7 @@
 //!   TENSOR DATA  the weights
 
 use std::collections::HashMap;
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, SeekFrom};
 
 use anyhow::Context;
 
@@ -41,6 +41,7 @@ pub struct TensorInfo {
 
 /// Everything the file says about itself (not the weights yet).
 pub struct Gguf {
+    pub path: String,
     pub version: u32,
     pub metadata: HashMap<String, Value>,
     pub tensors: Vec<TensorInfo>,
@@ -164,7 +165,40 @@ impl Gguf {
         let position = r.stream_position()?; // how many bytes we've read so far
         let data_start = position.div_ceil(alignment) * alignment;
 
-        Ok(Gguf { version, metadata, tensors, data_start })
+        Ok(Gguf { path: path.to_string(), version, metadata, tensors, data_start })
+    }
+
+    // ---------- Step 2.4: one tensor's weights ----------
+
+    /// One tensor's weights as normal f32 numbers.
+    pub fn read_tensor_f32(&self, name: &str) -> anyhow::Result<Vec<f32>> {
+        // 1. Find it in the index
+        let info = self.tensors.iter().find(|t| t.name == name).with_context(|| format!("no tensor called {name}"))?;
+        let count: u64 = info.dims.iter().product();
+
+        // 2. How many bytes it takes in the file
+        let size = match info.kind {
+            0 => count * 4,          // F32: 4 bytes per number
+            2 => count / 32 * 18,    // Q4_0: 18 bytes per 32 numbers
+            14 => count / 256 * 210, // Q6_K: 210 bytes per 256 numbers
+            other => anyhow::bail!("{name}: storage type {other} isn't supported yet"),
+        };
+
+        // 3. Jump to its bytes and read them
+        let mut file = std::fs::File::open(&self.path)?;
+        file.seek(SeekFrom::Start(self.data_start + info.offset))?;
+        let mut bytes = vec![0u8; size as usize];
+        file.read_exact(&mut bytes)?;
+
+        // 4. Unpack
+        let mut out = Vec::with_capacity(count as usize);
+        match info.kind {
+            0 => out.extend(bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))),
+            2 => crate::quant::dequantize_q4_0(&bytes, &mut out),
+            14 => crate::quant::dequantize_q6_k(&bytes, &mut out),
+            _ => unreachable!(),
+        }
+        Ok(out)
     }
 
     /// A whole-number setting, e.g. get_u32("qwen2.block_count") -> Some(28)
