@@ -557,7 +557,7 @@
           <span><span id="auth-switch-text">new here?</span> <button type="button" id="auth-switch">create account</button></span>
           <button type="button" id="auth-guest">use as guest</button>
         </div>
-        <p class="auth-note">Accounts are saved in this browser for now.</p>
+        <p class="auth-note">Your chats are saved on this kinSin server.</p>
       </div>
     </div>
   </div>
@@ -619,11 +619,10 @@ updateThemeLabel();
 
 let controller = null;     // lets the Stop button cancel the request
 
-// --- Accounts (kept in this browser for now) ---
-// Passwords are salted and hashed and never stored. When the server gets real logins,
-// only authSignup / authLogin / authLogout need to change (into fetch() calls).
-const ACCOUNTS_KEY = 'kinsin-accounts';   // { email: { name, salt, algo, hash } }
-const SESSION_KEY = 'kinsin-user';        // email of whoever is logged in
+// --- Accounts (on the kinSin server: /v1/auth/...) ---
+// The server keeps the login in an HttpOnly cookie that page scripts can't read.
+// This browser only caches who is logged in, so the right chats show at once.
+const SESSION_KEY = 'kinsin-user';        // { email, name } of whoever is logged in
 const GUEST_KEY = 'kinsin-guest';         // '1' once someone chose "use as guest"
 const GUEST_CHATS = 'kinsin-chats';
 function readStore(key) { try { return localStorage.getItem(key); } catch { return null; } }
@@ -631,21 +630,12 @@ function writeStore(key, value) {
   try { if (value === null) localStorage.removeItem(key); else localStorage.setItem(key, value); return true; }
   catch { return false; }
 }
-function loadAccounts() {
-  try {
-    const a = JSON.parse(readStore(ACCOUNTS_KEY) || '{}');
-    return a && typeof a === 'object' && !Array.isArray(a) ? a : {};
-  } catch { return {}; }
-}
-function findAccount(accounts, email) {
-  const a = email && Object.hasOwn(accounts, email) ? accounts[email] : null;
-  return a && typeof a.name === 'string' && typeof a.hash === 'string' && typeof a.salt === 'string' ? a : null;
-}
 // Read the session before the chats load: each account has its own chat list
 const currentUser = (() => {
-  const email = readStore(SESSION_KEY);
-  const account = findAccount(loadAccounts(), email);
-  return account ? { email, name: account.name } : null;
+  try {
+    const u = JSON.parse(readStore(SESSION_KEY));
+    return u && typeof u.email === 'string' && typeof u.name === 'string' ? { email: u.email, name: u.name } : null;
+  } catch { return null; }   // e.g. an old plain-email value: log in again
 })();
 
 // --- Saved chats ---
@@ -659,8 +649,12 @@ function blankChat() {
   return { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8), title: 'New chat', updated: Date.now(), messages: [] };
 }
 function loadChats() {
+  try { return cleanChats(JSON.parse(localStorage.getItem(STORE_KEY) || '[]')); }
+  catch { return []; }   // blocked or corrupt storage: start with no history
+}
+// Keep only well-formed chats (from this browser or from the server)
+function cleanChats(data) {
   try {
-    const data = JSON.parse(localStorage.getItem(STORE_KEY) || '[]');
     if (!Array.isArray(data)) return [];
     return data
       .filter(c => c && typeof c.id === 'string' && Array.isArray(c.messages))
@@ -675,10 +669,16 @@ function loadChats() {
             : userMessageFrom(m)),
       }))
       .filter(c => c.messages.length);
-  } catch { return []; }   // blocked or corrupt storage: start with no history
+  } catch { return []; }
 }
+let syncTimer = null;      // pending upload of the chats to the server
 function saveChats() {
   try { localStorage.setItem(STORE_KEY, JSON.stringify(chats)); } catch { /* blocked or full: keep going in memory */ }
+  if (currentUser) {
+    // Logged in: also keep them on the server, at most once per 800 ms of changes
+    clearTimeout(syncTimer);
+    syncTimer = setTimeout(pushChats, 800);
+  }
 }
 function autoTitle(text) {
   const first = text.split('\n')[0].trim();
@@ -1756,60 +1756,113 @@ document.querySelectorAll('.chip').forEach(c => c.addEventListener('click', () =
 }));
 document.getElementById('reset').addEventListener('click', () => { newChat(); closeSidebar(); });
 
-// --- Login, sign up, log out ---
-const toHex = bytes => [...bytes].map(b => b.toString(16).padStart(2, '0')).join('');
-const cleanEmail = email => email.trim().toLowerCase();
+// --- Login, sign up, log out (the server does the real work) ---
+// Talk to the server: send JSON, get JSON back. Errors carry the server's message and .status.
+async function api(path, body, method = 'POST') {
+  let res;
+  try {
+    res = await fetch(path, {
+      method,
+      headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch {
+    throw new Error("Can't reach the kinSin server. Is it running?");
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(data.error?.message || `Server error ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
+  return data;
+}
 
-async function hashPassword(password, salt, algo) {
-  const data = new TextEncoder().encode(salt + ':' + password);
-  if (algo === 'sha256') {
-    if (!window.crypto?.subtle) throw new Error('Open kinSin on localhost or https to sign in.');
-    return toHex(new Uint8Array(await crypto.subtle.digest('SHA-256', data)));
+// Logged in: move a guest's chats into the account (if it has none here yet) and remember who it is
+function rememberUser(user) {
+  const mine = 'kinsin-chats:' + user.email;
+  const guestChats = readStore(GUEST_CHATS);
+  if (guestChats && guestChats !== '[]' && !readStore(mine) && writeStore(mine, guestChats)) writeStore(GUEST_CHATS, null);
+  if (!writeStore(SESSION_KEY, JSON.stringify({ email: user.email, name: user.name }))) {
+    throw new Error('This browser blocked saving. Is it in private mode?');
   }
-  // 'fnv': fallback for plain-http pages from another device, where crypto.subtle is missing.
-  // Much weaker than SHA-256; fine only while accounts live in this one browser.
-  let h1 = 0x811c9dc5, h2 = 0x050c5d1f;
-  for (let round = 0; round < 2000; round++) {
-    for (const b of data) {
-      h1 = Math.imul(h1 ^ b, 0x01000193);
-      h2 = Math.imul(h2 ^ b ^ (h1 >>> 15), 0x01000193);
-    }
-    h1 = Math.imul(h1 ^ round, 0x01000193);
-    h2 = Math.imul(h2 ^ (h1 >>> 9), 0x01000193);
-  }
-  return (h1 >>> 0).toString(16).padStart(8, '0') + (h2 >>> 0).toString(16).padStart(8, '0');
 }
 
 async function authSignup(name, email, password) {
-  name = name.trim();
-  email = cleanEmail(email);
-  if (!name) throw new Error('Please type your name.');
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("That email doesn't look right.");
+  if (!name.trim()) throw new Error('Please type your name.');
   if (password.length < 8) throw new Error('Use at least 8 characters for the password.');
-  const accounts = loadAccounts();
-  if (Object.hasOwn(accounts, email)) throw new Error('That email already has an account. Sign in instead.');
-  const salt = toHex(crypto.getRandomValues(new Uint8Array(16)));
-  const algo = window.crypto?.subtle ? 'sha256' : 'fnv';
-  accounts[email] = { name, salt, algo, hash: await hashPassword(password, salt, algo) };
-  if (!writeStore(ACCOUNTS_KEY, JSON.stringify(accounts))) throw new Error('This browser blocked saving. Is it in private mode?');
-  // A guest's chats move into the new account, so nothing is lost
-  const guestChats = readStore(GUEST_CHATS);
-  if (guestChats && !readStore('kinsin-chats:' + email) && writeStore('kinsin-chats:' + email, guestChats)) writeStore(GUEST_CHATS, null);
-  if (!writeStore(SESSION_KEY, email)) throw new Error('This browser blocked saving. Is it in private mode?');
+  const { user } = await api('/v1/auth/signup', { name, email, password });
+  rememberUser(user);
 }
 
 async function authLogin(email, password) {
-  email = cleanEmail(email);
-  const account = findAccount(loadAccounts(), email);
-  const wrong = new Error('Wrong email or password.');   // same message either way: emails can't be guessed
-  if (!account) throw wrong;
-  if (await hashPassword(password, account.salt, account.algo || 'sha256') !== account.hash) throw wrong;
-  if (!writeStore(SESSION_KEY, email)) throw new Error('This browser blocked saving. Is it in private mode?');
+  const { user } = await api('/v1/auth/login', { email, password });
+  rememberUser(user);
 }
 
-function authLogout() {
+async function authLogout() {
+  clearTimeout(syncTimer);
+  await pushChats();                                  // don't lose the last change
+  await api('/v1/auth/logout', {}).catch(() => {});   // offline: the cookie just expires later
   writeStore(SESSION_KEY, null);
-  writeStore(GUEST_KEY, null);   // show the login card again next time
+  writeStore(GUEST_KEY, null);                        // show the login card again next time
+}
+
+// ---------- Chats on the server ----------
+async function pushChats() {
+  clearTimeout(syncTimer);
+  syncTimer = null;
+  if (!currentUser) return;
+  try { await api('/v1/chats', chats, 'PUT'); }
+  catch (err) {
+    if (err.status === 401) loggedOutElsewhere();
+    else console.warn('Could not save chats on the server:', err.message);
+  }
+}
+// Leaving the page with an upload still waiting: send it anyway
+addEventListener('pagehide', () => {
+  if (!syncTimer || !currentUser) return;
+  clearTimeout(syncTimer);
+  syncTimer = null;
+  try {
+    fetch('/v1/chats', { method: 'PUT', keepalive: true, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(chats) });
+  } catch { /* too big for keepalive: the local copy is pushed on the next visit */ }
+});
+
+// The server no longer knows this login (expired, or logged out): back to the login card
+function loggedOutElsewhere() {
+  writeStore(SESSION_KEY, null);
+  writeStore(GUEST_KEY, null);
+  location.reload();
+}
+
+async function syncFromServer() {
+  if (!currentUser) return;
+  try {
+    const { user } = await api('/v1/auth/me', undefined, 'GET');
+    if (user?.email !== currentUser.email) { loggedOutElsewhere(); return; }
+    const serverChats = cleanChats(await api('/v1/chats', undefined, 'GET'));
+    if (serverChats.length) {
+      // The server has the newest copy (from this or another device)
+      if (controller) {
+        // A reply is streaming into the open chat: keep that one as it is
+        const i = serverChats.findIndex(c => c.id === current.id);
+        if (i >= 0) serverChats[i] = current; else if (chats.includes(current)) serverChats.push(current);
+      }
+      chats = serverChats;
+      try { localStorage.setItem(STORE_KEY, JSON.stringify(chats)); } catch { /* memory only */ }
+      if (!controller) {
+        const same = chats.find(c => c.id === current.id);
+        if (same) { current = same; renderThread(); }   // reopen the open chat if it still exists
+      }
+      renderChatList();
+    } else if (chats.length) {
+      pushChats();   // first time on the server: upload what this browser has
+    }
+  } catch (err) {
+    if (err.status === 401) loggedOutElsewhere();
+    else console.warn('Working offline:', err.message);
+  }
 }
 
 const loginOverlay = document.getElementById('login-overlay');
@@ -1892,7 +1945,11 @@ function showLogout() {
   openCard(logoutOverlay, document.getElementById('logout-cancel'));
 }
 document.getElementById('logout-cancel').addEventListener('click', () => closeCard(logoutOverlay));
-document.getElementById('logout-go').addEventListener('click', () => { authLogout(); location.reload(); });
+document.getElementById('logout-go').addEventListener('click', async e => {
+  e.currentTarget.disabled = true;
+  await authLogout();
+  location.reload();
+});
 logoutOverlay.addEventListener('keydown', e => { if (e.key === 'Escape') { e.preventDefault(); closeCard(logoutOverlay); } });
 logoutOverlay.addEventListener('click', e => { if (e.target === logoutOverlay) closeCard(logoutOverlay); });
 
@@ -1912,7 +1969,7 @@ function showUser() {
   const name = document.createElement('b');
   name.textContent = currentUser ? currentUser.name : 'Guest';
   const small = document.createElement('span');
-  small.textContent = currentUser ? currentUser.email : 'chats saved in this browser';
+  small.textContent = currentUser ? currentUser.email : 'chats saved in this browser only';
   text.append(name, small);
   const btn = document.createElement('button');
   btn.type = 'button';
@@ -1928,6 +1985,7 @@ renderChatList();
 
 // First visit: ask to log in (or carry on as a guest)
 if (!currentUser && readStore(GUEST_KEY) !== '1') showLogin();
+syncFromServer();   // logged in: check the login and fetch the chats saved on the server
 </script>
 </body>
 </html>

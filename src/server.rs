@@ -2,10 +2,16 @@
 //!
 //!   GET  /                      -> the chat web page
 //!   GET  /health                -> "ok"
-//!   GET  /v1/models             -> which model is loaded
+//!   GET  /v1/models             -> which model is loaded (+ whether photo reading is on)
+//!   POST /v1/ocr                -> read the text in a photo (body = the image file)
+//!   POST /v1/audio/transcriptions -> speech to text with Whisper (form with a "file" WAV, like OpenAI)
 //!   POST /v1/chat/completions   -> a reply, streamed or all at once
-//!   POST /v1/ocr                -> the text in a photo (body = the image bytes)
-//!   POST /v1/audio/transcriptions -> speech to text (multipart form: file=WAV, language)
+//!   POST /v1/auth/signup        -> make an account   {name, email, password}  (sets the login cookie)
+//!   POST /v1/auth/login         -> log in            {email, password}        (sets the login cookie)
+//!   POST /v1/auth/logout        -> log out
+//!   GET  /v1/auth/me            -> who is logged in (401 if nobody)
+//!   GET  /v1/chats              -> the logged-in user's saved chats
+//!   PUT  /v1/chats              -> replace the logged-in user's saved chats (a JSON array)
 //!
 //! The model can only work on one request at a time on a CPU, so requests
 //! wait in a queue and a single worker thread answers them in order.
@@ -15,10 +21,10 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
-use axum::extract::DefaultBodyLimit;
-use axum::extract::Multipart;
+use axum::extract::{DefaultBodyLimit, Multipart};
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::header::{CONTENT_TYPE, COOKIE, SET_COOKIE};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
@@ -29,11 +35,12 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tower_http::cors::CorsLayer;
 
+use crate::accounts::{Accounts, AuthError, SESSION_DAYS, User};
 use crate::chat::{Message, Role, build_prompt_within};
 use crate::engine::{Engine, Stats};
 use crate::ocr::Ocr;
-use crate::sampler::SamplingOptions;
 use crate::voice::{self, Voice};
+use crate::sampler::SamplingOptions;
 
 // ---------- Limits that keep the server healthy ----------
 
@@ -41,10 +48,6 @@ use crate::voice::{self, Voice};
 const MAX_PENDING: usize = 8;
 /// Largest request body accepted, in bytes.
 const MAX_BODY_BYTES: usize = 64 * 1024;
-/// Largest photo accepted by /v1/ocr, in bytes.
-const MAX_PHOTO_BYTES: usize = 12 * 1024 * 1024;
-/// Largest recording accepted by /v1/audio/transcriptions, in bytes.
-const MAX_AUDIO_BYTES: usize = 16 * 1024 * 1024;
 /// Most messages in one conversation.
 const MAX_MESSAGES: usize = 200;
 /// Longest single message, in characters.
@@ -53,6 +56,14 @@ const MAX_MESSAGE_CHARS: usize = 16_000;
 const DEFAULT_MAX_TOKENS: usize = 512;
 const LIMIT_MAX_TOKENS: usize = 1024;
 /// A reply that takes longer than this is cut off.
+/// Largest photo accepted by /v1/ocr, in bytes.
+const MAX_PHOTO_BYTES: usize = 12 * 1024 * 1024;
+/// Largest recording accepted (2 minutes of 16 kHz mono WAV is about 4 MB).
+const MAX_AUDIO_BYTES: usize = 16 * 1024 * 1024;
+/// Largest chat list a user can save on the server.
+const MAX_CHATS_BYTES: usize = 4 * 1024 * 1024;
+/// Name of the login cookie.
+const SESSION_COOKIE: &str = "kinsin_session";
 const GENERATION_TIMEOUT: Duration = Duration::from_secs(120);
 
 // ---------- What the client sends (same shape as OpenAI) ----------
@@ -99,12 +110,16 @@ struct AppState {
     /// How many requests are waiting or being answered right now.
     pending: Arc<AtomicUsize>,
     model_name: String,
-    /// Photo reading; None when the OCR models are missing.
+    /// Photo reading; None if the OCR models aren't installed.
     ocr: Option<Arc<Ocr>>,
-    /// One photo at a time: OCR uses a lot of CPU.
+    /// Only one photo is read at a time, so OCR can't starve the chat of CPU.
     ocr_slot: Arc<tokio::sync::Semaphore>,
-    /// Speech to text; None when the Whisper model is missing. The Mutex = one recording at a time.
+    /// Speech to text; None if the Whisper model isn't installed. The Mutex means one recording at a time.
     voice: Option<Arc<std::sync::Mutex<Voice>>>,
+    /// Users, logins and saved chats.
+    accounts: Arc<Accounts>,
+    /// Add "Secure" to the login cookie (turn on when the site is served over https).
+    secure_cookies: bool,
 }
 
 /// The worker: owns the engine and answers jobs one by one, forever.
@@ -149,6 +164,8 @@ pub async fn serve(
     port: u16,
     ocr: Option<Ocr>,
     voice: Option<Voice>,
+    accounts: Accounts,
+    secure_cookies: bool,
 ) -> anyhow::Result<()> {
     let (queue, jobs) = mpsc::channel::<Job>();
     let pending = Arc::new(AtomicUsize::new(0));
@@ -162,31 +179,31 @@ pub async fn serve(
         ocr: ocr.map(Arc::new),
         ocr_slot: Arc::new(tokio::sync::Semaphore::new(1)),
         voice: voice.map(|v| Arc::new(std::sync::Mutex::new(v))),
+        accounts: Arc::new(accounts),
+        secure_cookies,
     };
-    let app = app(state);
+    let app = Router::new()
+        .route("/", get(|| async { Html(include_str!("../web/index.html")) }))
+        .route("/health", get(|| async { "ok" }))
+        .route("/v1/models", get(list_models))
+        .route("/v1/chat/completions", post(chat_completions))
+        // photos are bigger than chat messages, so this one route gets its own size limit
+        .route("/v1/ocr", post(read_photo).layer(DefaultBodyLimit::max(MAX_PHOTO_BYTES)))
+        .route("/v1/audio/transcriptions", post(transcribe).layer(DefaultBodyLimit::max(MAX_AUDIO_BYTES)))
+        .route("/v1/auth/signup", post(signup))
+        .route("/v1/auth/login", post(login))
+        .route("/v1/auth/logout", post(logout))
+        .route("/v1/auth/me", get(me))
+        .route("/v1/chats", get(load_chats).put(save_chats).layer(DefaultBodyLimit::max(MAX_CHATS_BYTES)))
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES)) // reject huge requests early
+        .layer(CorsLayer::permissive()) // allow a website on another port to call us
+        .with_state(state);
 
     let address = format!("0.0.0.0:{port}");
     let listener = tokio::net::TcpListener::bind(&address).await?;
     println!("Server running on http://localhost:{port}");
     axum::serve(listener, app).await?;
     Ok(())
-}
-
-fn app(state: AppState) -> Router {
-    Router::new()
-        .route("/", get(|| async { Html(include_str!("../web/index.html")) }))
-        .route("/health", get(|| async { "ok" }))
-        .route("/v1/models", get(list_models))
-        .route("/v1/chat/completions", post(chat_completions))
-        // Photos are bigger than chat messages: only this route gets a larger limit
-        .route("/v1/ocr", post(read_photo).layer(DefaultBodyLimit::max(MAX_PHOTO_BYTES)))
-        .route(
-            "/v1/audio/transcriptions",
-            post(transcribe_audio).layer(DefaultBodyLimit::max(MAX_AUDIO_BYTES)),
-        )
-        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES)) // reject huge requests early
-        .layer(CorsLayer::permissive()) // allow a website on another port to call us
-        .with_state(state)
 }
 
 // ---------- GET /v1/models ----------
@@ -199,85 +216,21 @@ async fn list_models(State(state): State<AppState>) -> Json<serde_json::Value> {
     }))
 }
 
-// ---------- POST /v1/audio/transcriptions ----------
-
-/// Speech to text, shaped like OpenAI's endpoint: a multipart form with
-/// "file" (a WAV recording) and optional "language" ("auto" or empty = detect).
-async fn transcribe_audio(State(state): State<AppState>, mut form: Multipart) -> Response {
-    let Some(voice) = state.voice.clone() else {
-        return error(StatusCode::SERVICE_UNAVAILABLE, "voice input is not set up on this server (Whisper model missing)");
-    };
-
-    let mut wav = None;
-    let mut language = String::new();
-    loop {
-        match form.next_field().await {
-            Ok(Some(field)) => match field.name() {
-                Some("file") => match field.bytes().await {
-                    Ok(bytes) => wav = Some(bytes),
-                    Err(e) => return error(StatusCode::BAD_REQUEST, &format!("could not read the recording: {e}")),
-                },
-                Some("language") => language = field.text().await.unwrap_or_default().trim().to_lowercase(),
-                _ => {} // ignore other fields (OpenAI clients send "model", etc.)
-            },
-            Ok(None) => break,
-            Err(e) => return error(StatusCode::BAD_REQUEST, &format!("could not read the form: {e}")),
-        }
-    }
-    let Some(wav) = wav.filter(|w| !w.is_empty()) else {
-        return error(StatusCode::BAD_REQUEST, "send the recording in a form field named \"file\"");
-    };
-    let language = match language.as_str() {
-        "" | "auto" => None,
-        code if voice::LANGUAGES.contains(&code) => Some(code.to_string()),
-        code => return error(StatusCode::BAD_REQUEST, &format!("unknown language '{code}'")),
-    };
-
-    let started = Instant::now();
-    // Whisper is heavy CPU work: run it on a blocking thread. The Mutex makes recordings take turns.
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<(String, String, f64)> {
-        let samples = voice::wav_to_samples(&wav)?;
-        let duration = samples.len() as f64 / 16_000.0;
-        let mut voice = voice.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let (text, language) = voice.transcribe(&samples, language.as_deref())?;
-        Ok((text, language, duration))
-    })
-    .await;
-
-    match result {
-        Ok(Ok((text, language, duration))) => Json(json!({
-            "text": text,
-            "language": language,
-            "duration": (duration * 100.0).round() / 100.0,
-            "ms": started.elapsed().as_millis() as u64
-        }))
-        .into_response(),
-        Ok(Err(e)) => error(StatusCode::BAD_REQUEST, &e.to_string()),
-        Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "speech to text crashed"),
-    }
-}
-
 // ---------- POST /v1/ocr ----------
 
-async fn read_photo(State(state): State<AppState>, body: Bytes) -> Response {
+async fn read_photo(State(state): State<AppState>, photo: Bytes) -> Response {
     let Some(ocr) = state.ocr.clone() else {
         return error(StatusCode::SERVICE_UNAVAILABLE, "photo reading is not set up on this server (OCR models missing)");
     };
-    if body.is_empty() {
-        return error(StatusCode::BAD_REQUEST, "send the photo as the request body");
+    if photo.is_empty() {
+        return error(StatusCode::BAD_REQUEST, "no photo was sent");
     }
-    // Wait for our turn: one photo at a time
-    let Ok(permit) = state.ocr_slot.clone().acquire_owned().await else {
-        return error(StatusCode::SERVICE_UNAVAILABLE, "photo reading stopped");
+    // Wait for our turn, then read the photo on a separate thread (OCR is heavy CPU work)
+    let Ok(_slot) = state.ocr_slot.acquire().await else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "photo reading is unavailable");
     };
-    let started = Instant::now();
-    // OCR is heavy CPU work: run it on a blocking thread, not on the async runtime.
-    // The permit moves in too, so the slot stays taken until OCR really ends (even if the client leaves).
-    let result = tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        ocr.read_text(&body)
-    })
-    .await;
+    let started = std::time::Instant::now();
+    let result = tokio::task::spawn_blocking(move || ocr.read_text(&photo)).await;
     match result {
         Ok(Ok(text)) => Json(json!({
             "text": text,
@@ -288,6 +241,174 @@ async fn read_photo(State(state): State<AppState>, body: Bytes) -> Response {
         Ok(Err(e)) => error(StatusCode::BAD_REQUEST, &e.to_string()),
         Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "photo reading crashed"),
     }
+}
+
+// ---------- POST /v1/audio/transcriptions ----------
+
+/// Same request shape as OpenAI's: a multipart form with "file" (the recording) and an optional "language".
+async fn transcribe(State(state): State<AppState>, mut form: Multipart) -> Response {
+    let Some(voice) = state.voice.clone() else {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "voice input is not set up on this server (Whisper model missing)");
+    };
+    let mut audio: Option<Bytes> = None;
+    let mut language: Option<String> = None;
+    loop {
+        match form.next_field().await {
+            Ok(Some(field)) => match field.name() {
+                Some("file") => match field.bytes().await {
+                    Ok(bytes) => audio = Some(bytes),
+                    Err(e) => return error(StatusCode::BAD_REQUEST, &format!("could not read the recording: {e}")),
+                },
+                Some("language") => {
+                    let value = field.text().await.unwrap_or_default().trim().to_lowercase();
+                    if !value.is_empty() && value != "auto" {
+                        language = Some(value);
+                    }
+                }
+                _ => {}
+            },
+            Ok(None) => break,
+            Err(e) => return error(StatusCode::BAD_REQUEST, &format!("bad form data: {e}")),
+        }
+    }
+    let Some(audio) = audio else {
+        return error(StatusCode::BAD_REQUEST, "no recording was sent (form field \"file\")");
+    };
+
+    let started = std::time::Instant::now();
+    // Whisper is heavy CPU work: run it on a separate thread
+    let result = tokio::task::spawn_blocking(move || {
+        let samples = voice::wav_to_samples(&audio)?;
+        let seconds = samples.len() as f64 / 16000.0;
+        let mut voice = voice.lock().map_err(|_| anyhow::anyhow!("voice model is unavailable"))?;
+        let (text, language) = voice.transcribe(&samples, language.as_deref())?;
+        Ok::<_, anyhow::Error>((text, language, seconds))
+    })
+    .await;
+    match result {
+        Ok(Ok((text, language, seconds))) => Json(json!({
+            "text": text,
+            "language": language,
+            "duration": (seconds * 10.0).round() / 10.0,
+            "ms": started.elapsed().as_millis() as u64
+        }))
+        .into_response(),
+        Ok(Err(e)) => error(StatusCode::BAD_REQUEST, &e.to_string()),
+        Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "voice input crashed"),
+    }
+}
+
+// ---------- Accounts: /v1/auth/... and /v1/chats ----------
+
+#[derive(Deserialize)]
+struct SignupRequest {
+    name: String,
+    email: String,
+    password: String,
+}
+
+#[derive(Deserialize)]
+struct LoginRequest {
+    email: String,
+    password: String,
+}
+
+async fn signup(State(state): State<AppState>, Json(request): Json<SignupRequest>) -> Response {
+    let accounts = state.accounts.clone();
+    // Hashing a password is slow on purpose, so it runs off the async threads
+    let result = tokio::task::spawn_blocking(move || accounts.signup(&request.name, &request.email, &request.password)).await;
+    logged_in(result, state.secure_cookies)
+}
+
+async fn login(State(state): State<AppState>, Json(request): Json<LoginRequest>) -> Response {
+    let accounts = state.accounts.clone();
+    let result = tokio::task::spawn_blocking(move || accounts.login(&request.email, &request.password)).await;
+    logged_in(result, state.secure_cookies)
+}
+
+/// Success: give the browser its login cookie. HttpOnly = page scripts can't read it,
+/// SameSite=Lax = other websites can't use it to send requests as you.
+fn logged_in(result: Result<Result<(User, String), AuthError>, tokio::task::JoinError>, secure: bool) -> Response {
+    match result {
+        Ok(Ok((user, token))) => {
+            let cookie = format!(
+                "{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}{}",
+                SESSION_DAYS * 24 * 60 * 60,
+                if secure { "; Secure" } else { "" }
+            );
+            ([(SET_COOKIE, cookie)], Json(json!({ "user": user }))).into_response()
+        }
+        Ok(Err(e)) => auth_error(e),
+        Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "login crashed"),
+    }
+}
+
+async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(token) = session_token(&headers) {
+        state.accounts.logout(&token);
+    }
+    let cookie = format!("{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
+    ([(SET_COOKIE, cookie)], Json(json!({ "ok": true }))).into_response()
+}
+
+async fn me(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    match current_user(&state, &headers) {
+        Some(user) => Json(json!({ "user": user })).into_response(),
+        None => error(StatusCode::UNAUTHORIZED, "not logged in"),
+    }
+}
+
+async fn load_chats(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let Some(user) = current_user(&state, &headers) else {
+        return error(StatusCode::UNAUTHORIZED, "log in to load saved chats");
+    };
+    match state.accounts.load_chats(user.id) {
+        Ok(json) => ([(CONTENT_TYPE, "application/json")], json).into_response(),
+        Err(e) => auth_error(e),
+    }
+}
+
+async fn save_chats(State(state): State<AppState>, headers: HeaderMap, Json(chats): Json<serde_json::Value>) -> Response {
+    let Some(user) = current_user(&state, &headers) else {
+        return error(StatusCode::UNAUTHORIZED, "log in to save chats");
+    };
+    if !chats.is_array() {
+        return error(StatusCode::BAD_REQUEST, "chats must be a JSON array");
+    }
+    match state.accounts.save_chats(user.id, &chats.to_string()) {
+        Ok(()) => Json(json!({ "ok": true })).into_response(),
+        Err(e) => auth_error(e),
+    }
+}
+
+/// The login token from the request's cookie, if it has a well-formed one.
+fn session_token(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get_all(COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(';'))
+        .filter_map(|pair| pair.trim().strip_prefix(SESSION_COOKIE)?.strip_prefix('='))
+        .find(|token| token.len() == 64 && token.chars().all(|c| c.is_ascii_hexdigit()))
+        .map(String::from)
+}
+
+fn current_user(state: &AppState, headers: &HeaderMap) -> Option<User> {
+    state.accounts.user_for_token(&session_token(headers)?)
+}
+
+fn auth_error(e: AuthError) -> Response {
+    let status = match &e {
+        AuthError::BadInput(_) => StatusCode::BAD_REQUEST,
+        AuthError::EmailTaken => StatusCode::CONFLICT,
+        AuthError::WrongLogin => StatusCode::UNAUTHORIZED,
+        AuthError::TooManyTries => StatusCode::TOO_MANY_REQUESTS,
+        AuthError::Internal(details) => {
+            eprintln!("accounts error: {details}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    };
+    error(status, &e.to_string())
 }
 
 // ---------- POST /v1/chat/completions ----------
@@ -430,7 +551,15 @@ mod tests {
             ocr: None,
             ocr_slot: Arc::new(tokio::sync::Semaphore::new(1)),
             voice: None,
+            accounts: Arc::new(Accounts::in_memory().unwrap()),
+            secure_cookies: false,
         }
+    }
+
+    #[tokio::test]
+    async fn photo_without_ocr_models_answers_503() {
+        let response = read_photo(State(state_with_pending(0)), Bytes::from_static(b"x")).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
@@ -476,57 +605,51 @@ mod tests {
         assert_eq!(events[2], "data: [DONE]");
     }
 
-    #[tokio::test]
-    async fn photo_without_ocr_models_answers_503() {
-        let response = read_photo(State(state_with_pending(0)), Bytes::from_static(b"some photo bytes")).await;
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    fn cookie_from(response: &Response) -> HeaderMap {
+        let set = response.headers()[SET_COOKIE].to_str().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(COOKIE, set.split(';').next().unwrap().parse().unwrap());
+        headers
     }
 
     #[tokio::test]
-    async fn models_say_whether_photo_reading_is_on() {
-        let Json(body) = list_models(State(state_with_pending(0))).await;
-        assert_eq!(body["kinsin"]["ocr"], false);
-        assert_eq!(body["kinsin"]["voice"], false);
-    }
+    async fn signup_cookie_chats_and_logout() {
+        let state = state_with_pending(0);
+        let request = SignupRequest { name: "Gauri".into(), email: "g@example.com".into(), password: "kinsin-rocks".into() };
+        let response = signup(State(state.clone()), Json(request)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let set = response.headers()[SET_COOKIE].to_str().unwrap().to_string();
+        assert!(set.contains("HttpOnly") && set.contains("SameSite=Lax"), "{set}");
+        let cookie = cookie_from(&response);
 
-    /// Send a POST with a body of `size` bytes through the real router; return the status.
-    async fn post_size(path: &str, size: usize) -> StatusCode {
-        use tower::ServiceExt;
-        let request = axum::http::Request::post(path)
-            .header("content-type", "application/json")
-            .body(axum::body::Body::from(vec![b' '; size]))
-            .unwrap();
-        app(state_with_pending(0)).oneshot(request).await.unwrap().status()
-    }
+        assert_eq!(me(State(state.clone()), cookie.clone()).await.status(), StatusCode::OK);
+        assert_eq!(me(State(state.clone()), HeaderMap::new()).await.status(), StatusCode::UNAUTHORIZED);
 
-    #[tokio::test]
-    async fn photo_route_accepts_big_bodies_but_others_keep_64kb_limit() {
-        // A 5 MB photo gets past the size limit (and then hits "no OCR models" = 503)
-        assert_eq!(post_size("/v1/ocr", 5 * 1024 * 1024).await, StatusCode::SERVICE_UNAVAILABLE);
-        // Over 12 MB is refused
-        assert_eq!(post_size("/v1/ocr", MAX_PHOTO_BYTES + 1).await, StatusCode::PAYLOAD_TOO_LARGE);
-        // Chat requests still stop at 64 KB
-        assert_eq!(post_size("/v1/chat/completions", MAX_BODY_BYTES + 1).await, StatusCode::PAYLOAD_TOO_LARGE);
+        let chats = json!([{ "id": "1", "title": "hi", "messages": [] }]);
+        assert_eq!(save_chats(State(state.clone()), cookie.clone(), Json(chats.clone())).await.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(load_chats(State(state.clone()), cookie.clone()).await.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&body).unwrap(), chats);
+        assert_eq!(save_chats(State(state.clone()), cookie.clone(), Json(json!({"x": 1}))).await.status(), StatusCode::BAD_REQUEST);
+
+        logout(State(state.clone()), cookie.clone()).await;
+        assert_eq!(me(State(state.clone()), cookie.clone()).await.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(load_chats(State(state), cookie).await.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
-    async fn voice_without_whisper_model_answers_503() {
-        use tower::ServiceExt;
-        let boundary = "XyZ";
-        let body = format!(
-            "--{boundary}
-Content-Disposition: form-data; name=\"file\"; filename=\"speech.wav\"
-Content-Type: audio/wav
+    async fn wrong_login_answers_401() {
+        let state = state_with_pending(0);
+        let request = LoginRequest { email: "nobody@example.com".into(), password: "whatever1".into() };
+        assert_eq!(login(State(state), Json(request)).await.status(), StatusCode::UNAUTHORIZED);
+    }
 
-RIFF....
---{boundary}--
-"
-        );
-        let request = axum::http::Request::post("/v1/audio/transcriptions")
-            .header("content-type", format!("multipart/form-data; boundary={boundary}"))
-            .body(axum::body::Body::from(body))
-            .unwrap();
-        let response = app(state_with_pending(0)).oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    #[test]
+    fn bad_cookies_are_ignored() {
+        let mut headers = HeaderMap::new();
+        headers.insert(COOKIE, "theme=dark; kinsin_session=not-hex".parse().unwrap());
+        assert_eq!(session_token(&headers), None);
+        let good = "a".repeat(64);
+        headers.insert(COOKIE, format!("theme=dark; kinsin_session={good}").parse().unwrap());
+        assert_eq!(session_token(&headers), Some(good));
     }
 }

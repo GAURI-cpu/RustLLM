@@ -2,11 +2,14 @@
 //!   cargo run --release                         chat in the terminal
 //!   cargo run --release -- --serve              start the HTTP server on port 8080
 //!   cargo run --release -- --serve --port 3001  another port
+//!   cargo run --release -- --serve --ocr-models models/ocr   folder with the photo-reading models
+//!   cargo run --release -- --serve --whisper-model models/whisper   folder with the Whisper speech model
+//!   cargo run --release -- --serve --db data/kinsin.db   where accounts and saved chats are kept
+//!   cargo run --release -- --serve --secure-cookies   when the site is served over https
 //!   cargo run --release -- --model models/other-model.gguf
 //!   cargo run --release -- --context 8192      allow longer conversations
-//!   cargo run --release -- --serve --ocr-models models/ocr   where the photo-reading models are
-//!   cargo run --release -- --serve --whisper-model models/whisper   where the speech-to-text model is
 
+mod accounts;
 mod chat;
 mod engine;
 mod ocr;
@@ -30,10 +33,12 @@ fn main() -> Result<()> {
     let mut model_path = "models/qwen2.5-0.5b-instruct-q4_k_m.gguf".to_string();
     let mut tokenizer_path = "models/tokenizer.json".to_string();
     let mut serve = false;
+    let mut ocr_dir = "models/ocr".to_string();
+    let mut whisper_dir = "models/whisper".to_string();
+    let mut db_path = "data/kinsin.db".to_string();
+    let mut secure_cookies = false;
     let mut port: u16 = 8080;
     let mut context: usize = 4096;
-    let mut ocr_models = "models/ocr".to_string();
-    let mut whisper_model = "models/whisper".to_string();
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -48,20 +53,25 @@ fn main() -> Result<()> {
                 i += 1;
             }
             "--serve" => serve = true,
+            "--secure-cookies" => secure_cookies = true,
+            "--db" if i + 1 < args.len() => {
+                db_path = args[i + 1].clone();
+                i += 1;
+            }
+            "--whisper-model" if i + 1 < args.len() => {
+                whisper_dir = args[i + 1].clone();
+                i += 1;
+            }
+            "--ocr-models" if i + 1 < args.len() => {
+                ocr_dir = args[i + 1].clone();
+                i += 1;
+            }
             "--port" if i + 1 < args.len() => {
                 port = args[i + 1].parse()?;
                 i += 1;
             }
             "--context" if i + 1 < args.len() => {
                 context = args[i + 1].parse()?;
-                i += 1;
-            }
-            "--ocr-models" if i + 1 < args.len() => {
-                ocr_models = args[i + 1].clone();
-                i += 1;
-            }
-            "--whisper-model" if i + 1 < args.len() => {
-                whisper_model = args[i + 1].clone();
                 i += 1;
             }
             other => anyhow::bail!("unknown option: {other}"),
@@ -74,11 +84,14 @@ fn main() -> Result<()> {
     let mut engine = Engine::load(&model_path, &tokenizer_path, context)?;
 
     if serve {
-        let ocr = load_ocr(Path::new(&ocr_models));
-        let voice = load_voice(Path::new(&whisper_model));
         // Start the async runtime and run the server until Ctrl+C
         let runtime = tokio::runtime::Runtime::new()?;
-        return runtime.block_on(server::serve(engine, model_path, port, ocr, voice));
+        let ocr = load_ocr(Path::new(&ocr_dir));
+        let voice = load_voice(Path::new(&whisper_dir));
+        // Accounts and saved chats live in one database file
+        let accounts = accounts::Accounts::open(Path::new(&db_path))?;
+        println!("Accounts: on ({})", db_path);
+        return runtime.block_on(server::serve(engine, model_path, port, ocr, voice, accounts, secure_cookies));
     }
 
     let opts = SamplingOptions::default();
