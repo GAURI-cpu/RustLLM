@@ -321,8 +321,123 @@
   .edit-buttons .edit-save { background: var(--accent); border-color: var(--accent); color: #fff; }
   .app.busy .edit-save { opacity: 0.5; cursor: default; }
 
+  /* Login / sign up / log out: a frosted plastic ID badge on a lanyard */
+  :root {
+    --veil: 35%;
+    --card-fill: linear-gradient(155deg, color-mix(in srgb, #fff 42%, transparent), color-mix(in srgb, var(--accent) 7%, transparent));
+    --card-border: rgba(255, 255, 255, 0.75);
+    --card-hi: rgba(255, 255, 255, 0.9);
+    --card-shadow: color-mix(in srgb, var(--accent) 22%, transparent);
+    --card-shine: rgba(255, 255, 255, 0.2);
+    --field-fill: rgba(255, 255, 255, 0.3);
+    --field-border: rgba(255, 255, 255, 0.7);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --veil: 45%;
+      --card-fill: linear-gradient(155deg, rgba(255, 255, 255, 0.12), color-mix(in srgb, var(--accent) 10%, rgba(255, 255, 255, 0.03)));
+      --card-border: rgba(255, 255, 255, 0.25); --card-hi: rgba(255, 255, 255, 0.25); --card-shadow: rgba(0, 0, 0, 0.5);
+      --card-shine: rgba(255, 255, 255, 0.05); --field-fill: rgba(255, 255, 255, 0.07); --field-border: rgba(255, 255, 255, 0.2);
+    }
+  }
+  :root[data-theme="dark"] {
+    --veil: 45%;
+    --card-fill: linear-gradient(155deg, rgba(255, 255, 255, 0.12), color-mix(in srgb, var(--accent) 10%, rgba(255, 255, 255, 0.03)));
+    --card-border: rgba(255, 255, 255, 0.25); --card-hi: rgba(255, 255, 255, 0.25); --card-shadow: rgba(0, 0, 0, 0.5);
+    --card-shine: rgba(255, 255, 255, 0.05); --field-fill: rgba(255, 255, 255, 0.07); --field-border: rgba(255, 255, 255, 0.2);
+  }
+  .auth-overlay {
+    position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; place-items: safe center;
+    padding: 16px; overflow-y: auto;
+    background: color-mix(in srgb, var(--bg) var(--veil), transparent);
+    -webkit-backdrop-filter: blur(9px) saturate(120%); backdrop-filter: blur(9px) saturate(120%);
+  }
+  .auth-overlay[hidden] { display: none; }
+  .badge { position: relative; width: min(360px, 100%); margin-top: 96px; transform-origin: 50% -96px; }
+  .strap {
+    position: absolute; left: 50%; bottom: 100%; width: 34px; height: 92px; transform: translateX(-50%);
+    background: linear-gradient(90deg,
+      color-mix(in srgb, var(--accent) 70%, #000), var(--accent) 24%,
+      color-mix(in srgb, var(--accent) 62%, #fff) 50%, var(--accent) 76%,
+      color-mix(in srgb, var(--accent) 70%, #000));
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
+  }
+  .clip {
+    position: absolute; left: 50%; top: -10px; z-index: 2; width: 46px; height: 16px; transform: translateX(-50%);
+    border-radius: 3px; background: linear-gradient(#f6f6f6, #b4b4b4 55%, #e8e8e8);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3), inset 0 1px 0 #fff;
+  }
+  .auth-card {
+    position: relative; padding: 36px 28px 22px; border-radius: 6px; color: var(--ink);
+    background: var(--card-fill); border: 1px solid var(--card-border);
+    box-shadow: inset 0 1px 0 var(--card-hi), 0 18px 50px var(--card-shadow);
+  }
+  .auth-card::before {
+    content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
+    background: linear-gradient(115deg, var(--card-shine) 0 20%, transparent 20.5%);
+  }
+  .auth-card > * { position: relative; }   /* above the shine */
+  .auth-card > .slot {
+    position: absolute; left: 50%; top: 12px; width: 54px; height: 8px; transform: translateX(-50%); border-radius: 4px;
+    background: color-mix(in srgb, var(--ink) 18%, transparent); box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.3);
+  }
+  .auth-brand { display: flex; align-items: center; justify-content: center; gap: 9px; font: 600 19px var(--mono); letter-spacing: -0.02em; }
+  .auth-brand svg { width: 28px; height: 28px; }
+  .auth-brand span span { color: var(--accent); }
+  .auth-title { margin: 6px 0 20px; text-align: center; font: 600 13px var(--mono); letter-spacing: 0.25em; color: var(--accent); }
+  .field {
+    display: flex; align-items: center; gap: 10px; height: 42px; margin-bottom: 12px; padding: 0 12px; border-radius: 4px;
+    background: var(--field-fill); border: 1px solid var(--field-border);
+  }
+  .field[hidden] { display: none; }
+  .field:focus-within { border-color: var(--accent); }
+  .field svg { width: 17px; height: 17px; flex-shrink: 0; color: var(--accent); }
+  .field input { flex: 1; min-width: 0; border: 0; outline: 0; background: none; color: var(--ink); font: 16px var(--sans); }
+  .field input::placeholder { color: var(--muted); }
+  .auth-error { min-height: 18px; margin: -2px 0 8px; text-align: center; font: 12px var(--mono); color: var(--accent); }
+  .auth-go, .auth-ghost {
+    width: 100%; height: 42px; border-radius: 4px; cursor: pointer; font: 600 15px var(--sans);
+  }
+  .auth-go { border: 0; background: var(--accent); color: #fff; box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.3); }
+  .auth-go:disabled { opacity: 0.6; cursor: progress; }
+  .auth-ghost { background: var(--field-fill); border: 1px solid var(--field-border); color: var(--ink); }
+  .auth-ghost:hover { border-color: var(--accent); }
+  .auth-go:focus-visible, .auth-ghost:focus-visible, .auth-links button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .auth-links { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 12px; margin-top: 14px; font: 12px var(--mono); }
+  .auth-links button { background: none; border: 0; padding: 0; font: inherit; color: var(--accent); text-decoration: underline; cursor: pointer; }
+  .auth-note { margin: 12px 0 0; text-align: center; font: 11px var(--mono); color: var(--muted); }
+  .badge-who { display: flex; flex-direction: column; align-items: center; gap: 4px; margin-bottom: 20px; min-width: 0; }
+  .badge-who b { font-size: 16px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .badge-who small { font: 12px var(--mono); color: var(--muted); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .avatar {
+    flex-shrink: 0; width: 54px; height: 54px; border-radius: 50%; display: grid; place-items: center;
+    background: var(--accent); color: #fff; font: 700 22px var(--sans); box-shadow: 0 0 0 3px var(--field-border);
+  }
+  .auth-row { display: flex; gap: 10px; }
+  @media (prefers-reduced-motion: no-preference) {
+    .auth-overlay:not([hidden]) .badge { animation: badge-drop 0.55s cubic-bezier(0.2, 1.5, 0.4, 1) both; }
+  }
+  @keyframes badge-drop {
+    from { transform: translateY(-40px) rotate(-3deg); opacity: 0; }
+    to { transform: none; opacity: 1; }
+  }
+  /* Who is using kinSin, at the bottom of the sidebar */
+  .sidebar-note.has-user { padding: 10px 12px; }
+  .user-chip { display: flex; align-items: center; gap: 10px; }
+  .user-chip .avatar { width: 30px; height: 30px; font-size: 13px; box-shadow: none; }
+  .user-chip .avatar.guest { background: var(--line); color: var(--muted); }
+  .user-text { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.35; }
+  .user-text b { font: 600 13px var(--sans); color: var(--ink); }
+  .user-text b, .user-text span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .user-chip button {
+    flex-shrink: 0; padding: 5px 9px; border-radius: 8px; cursor: pointer;
+    background: none; border: 1px solid var(--line); color: var(--ink); font: 12px var(--mono);
+  }
+  .user-chip button:hover { border-color: var(--accent); color: var(--accent); }
+
   /* Phones */
   @media (max-width: 520px) {
+    .auth-card { padding: 34px 20px 20px; }
     header { padding: 10px 14px; }
     #status { display: none; }          /* keep just the green dot */
     .thread { padding: 18px 14px 8px; }
@@ -338,7 +453,7 @@
       New chat
     </button>
     <nav class="chat-list" id="chat-list"></nav>
-    <div class="sidebar-note">Chats are saved in this browser only.</div>
+    <div class="sidebar-note" id="side-foot">Chats are saved in this browser only.</div>
   </aside>
   <div class="backdrop" id="backdrop"></div>
 
@@ -409,6 +524,72 @@
   </footer>
   </div>
 
+  <!-- Login / create account: a plastic ID badge -->
+  <div class="auth-overlay" id="login-overlay" hidden>
+    <div class="badge" role="dialog" aria-modal="true" aria-labelledby="login-title">
+      <div class="strap"></div><div class="clip"></div>
+      <div class="auth-card">
+        <div class="slot"></div>
+        <div class="auth-brand">
+          <svg viewBox="0 0 64 64" aria-hidden="true">
+            <rect width="64" height="64" rx="16" fill="var(--accent)"/>
+            <path d="M16 14v36M16 36l13-12" fill="none" stroke="var(--logo-k)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M21 40C23 35.2 24.8 33 26.8 33S30.6 35.2 32.6 40 36.4 47 38.4 47 42.2 44.8 44.2 40 48 33 50 33" fill="none" stroke="var(--logo-wave)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span>kin<span>Sin</span></span>
+        </div>
+        <h2 class="auth-title" id="login-title">LOGIN</h2>
+        <label class="field" id="name-row" hidden>
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="8" r="4.5"/><path d="M3 21c0-4.4 4-7.5 9-7.5s9 3.1 9 7.5z"/></svg>
+          <input id="auth-name" placeholder="your name" aria-label="Your name" autocomplete="name" maxlength="40">
+        </label>
+        <label class="field">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 5h18a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zm9 7.2L4.5 7.5v.2L12 12.6l7.5-4.9v-.2z"/></svg>
+          <input id="auth-email" type="email" placeholder="email" aria-label="Email" autocomplete="email" maxlength="120" spellcheck="false">
+        </label>
+        <label class="field">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 10V7a5 5 0 0 1 10 0v3h1.5A1.5 1.5 0 0 1 20 11.5v9A1.5 1.5 0 0 1 18.5 22h-13A1.5 1.5 0 0 1 4 20.5v-9A1.5 1.5 0 0 1 5.5 10zm2.5 0h5V7a2.5 2.5 0 0 0-5 0z"/></svg>
+          <input id="auth-pass" type="password" placeholder="password" aria-label="Password" autocomplete="current-password" maxlength="200">
+        </label>
+        <div class="auth-error" id="auth-error" role="alert"></div>
+        <button type="button" class="auth-go" id="auth-go">Sign in</button>
+        <div class="auth-links">
+          <span><span id="auth-switch-text">new here?</span> <button type="button" id="auth-switch">create account</button></span>
+          <button type="button" id="auth-guest">use as guest</button>
+        </div>
+        <p class="auth-note">Accounts are saved in this browser for now.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Log out -->
+  <div class="auth-overlay" id="logout-overlay" hidden>
+    <div class="badge" role="dialog" aria-modal="true" aria-labelledby="logout-title">
+      <div class="strap"></div><div class="clip"></div>
+      <div class="auth-card">
+        <div class="slot"></div>
+        <div class="auth-brand">
+          <svg viewBox="0 0 64 64" aria-hidden="true">
+            <rect width="64" height="64" rx="16" fill="var(--accent)"/>
+            <path d="M16 14v36M16 36l13-12" fill="none" stroke="var(--logo-k)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M21 40C23 35.2 24.8 33 26.8 33S30.6 35.2 32.6 40 36.4 47 38.4 47 42.2 44.8 44.2 40 48 33 50 33" fill="none" stroke="var(--logo-wave)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span>kin<span>Sin</span></span>
+        </div>
+        <h2 class="auth-title" id="logout-title">LOG OUT</h2>
+        <div class="badge-who">
+          <div class="avatar" id="logout-avatar"></div>
+          <b id="logout-name"></b>
+          <small id="logout-email"></small>
+        </div>
+        <div class="auth-row">
+          <button type="button" class="auth-ghost" id="logout-cancel">Cancel</button>
+          <button type="button" class="auth-go" id="logout-go">Log out</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
 <script>
 const thread = document.getElementById('thread');
 const scroller = document.getElementById('scroller');
@@ -438,10 +619,39 @@ updateThemeLabel();
 
 let controller = null;     // lets the Stop button cancel the request
 
+// --- Accounts (kept in this browser for now) ---
+// Passwords are salted and hashed and never stored. When the server gets real logins,
+// only authSignup / authLogin / authLogout need to change (into fetch() calls).
+const ACCOUNTS_KEY = 'kinsin-accounts';   // { email: { name, salt, algo, hash } }
+const SESSION_KEY = 'kinsin-user';        // email of whoever is logged in
+const GUEST_KEY = 'kinsin-guest';         // '1' once someone chose "use as guest"
+const GUEST_CHATS = 'kinsin-chats';
+function readStore(key) { try { return localStorage.getItem(key); } catch { return null; } }
+function writeStore(key, value) {
+  try { if (value === null) localStorage.removeItem(key); else localStorage.setItem(key, value); return true; }
+  catch { return false; }
+}
+function loadAccounts() {
+  try {
+    const a = JSON.parse(readStore(ACCOUNTS_KEY) || '{}');
+    return a && typeof a === 'object' && !Array.isArray(a) ? a : {};
+  } catch { return {}; }
+}
+function findAccount(accounts, email) {
+  const a = email && Object.hasOwn(accounts, email) ? accounts[email] : null;
+  return a && typeof a.name === 'string' && typeof a.hash === 'string' && typeof a.salt === 'string' ? a : null;
+}
+// Read the session before the chats load: each account has its own chat list
+const currentUser = (() => {
+  const email = readStore(SESSION_KEY);
+  const account = findAccount(loadAccounts(), email);
+  return account ? { email, name: account.name } : null;
+})();
+
 // --- Saved chats ---
 // chats: [{ id, title, updated, messages: [{ role, content, meta? }] }], newest first when listed.
 // current: the open chat. A new chat only joins `chats` once its first message is sent.
-const STORE_KEY = 'kinsin-chats';
+const STORE_KEY = currentUser ? 'kinsin-chats:' + currentUser.email : GUEST_CHATS;
 let chats = loadChats();
 let current = blankChat();
 
@@ -1546,8 +1756,178 @@ document.querySelectorAll('.chip').forEach(c => c.addEventListener('click', () =
 }));
 document.getElementById('reset').addEventListener('click', () => { newChat(); closeSidebar(); });
 
+// --- Login, sign up, log out ---
+const toHex = bytes => [...bytes].map(b => b.toString(16).padStart(2, '0')).join('');
+const cleanEmail = email => email.trim().toLowerCase();
+
+async function hashPassword(password, salt, algo) {
+  const data = new TextEncoder().encode(salt + ':' + password);
+  if (algo === 'sha256') {
+    if (!window.crypto?.subtle) throw new Error('Open kinSin on localhost or https to sign in.');
+    return toHex(new Uint8Array(await crypto.subtle.digest('SHA-256', data)));
+  }
+  // 'fnv': fallback for plain-http pages from another device, where crypto.subtle is missing.
+  // Much weaker than SHA-256; fine only while accounts live in this one browser.
+  let h1 = 0x811c9dc5, h2 = 0x050c5d1f;
+  for (let round = 0; round < 2000; round++) {
+    for (const b of data) {
+      h1 = Math.imul(h1 ^ b, 0x01000193);
+      h2 = Math.imul(h2 ^ b ^ (h1 >>> 15), 0x01000193);
+    }
+    h1 = Math.imul(h1 ^ round, 0x01000193);
+    h2 = Math.imul(h2 ^ (h1 >>> 9), 0x01000193);
+  }
+  return (h1 >>> 0).toString(16).padStart(8, '0') + (h2 >>> 0).toString(16).padStart(8, '0');
+}
+
+async function authSignup(name, email, password) {
+  name = name.trim();
+  email = cleanEmail(email);
+  if (!name) throw new Error('Please type your name.');
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("That email doesn't look right.");
+  if (password.length < 8) throw new Error('Use at least 8 characters for the password.');
+  const accounts = loadAccounts();
+  if (Object.hasOwn(accounts, email)) throw new Error('That email already has an account. Sign in instead.');
+  const salt = toHex(crypto.getRandomValues(new Uint8Array(16)));
+  const algo = window.crypto?.subtle ? 'sha256' : 'fnv';
+  accounts[email] = { name, salt, algo, hash: await hashPassword(password, salt, algo) };
+  if (!writeStore(ACCOUNTS_KEY, JSON.stringify(accounts))) throw new Error('This browser blocked saving. Is it in private mode?');
+  // A guest's chats move into the new account, so nothing is lost
+  const guestChats = readStore(GUEST_CHATS);
+  if (guestChats && !readStore('kinsin-chats:' + email) && writeStore('kinsin-chats:' + email, guestChats)) writeStore(GUEST_CHATS, null);
+  if (!writeStore(SESSION_KEY, email)) throw new Error('This browser blocked saving. Is it in private mode?');
+}
+
+async function authLogin(email, password) {
+  email = cleanEmail(email);
+  const account = findAccount(loadAccounts(), email);
+  const wrong = new Error('Wrong email or password.');   // same message either way: emails can't be guessed
+  if (!account) throw wrong;
+  if (await hashPassword(password, account.salt, account.algo || 'sha256') !== account.hash) throw wrong;
+  if (!writeStore(SESSION_KEY, email)) throw new Error('This browser blocked saving. Is it in private mode?');
+}
+
+function authLogout() {
+  writeStore(SESSION_KEY, null);
+  writeStore(GUEST_KEY, null);   // show the login card again next time
+}
+
+const loginOverlay = document.getElementById('login-overlay');
+const logoutOverlay = document.getElementById('logout-overlay');
+const authName = document.getElementById('auth-name');
+const authEmail = document.getElementById('auth-email');
+const authPass = document.getElementById('auth-pass');
+const authError = document.getElementById('auth-error');
+const authGo = document.getElementById('auth-go');
+const behindCards = [appEl, document.getElementById('sidebar'), document.getElementById('backdrop')];
+let authMode = 'login';        // 'login' or 'signup'
+let authWorking = false;
+let focusBeforeCard = null;    // where focus goes back to when a card closes
+
+function openCard(overlay, firstField) {
+  focusBeforeCard = document.activeElement;
+  closeSidebar();
+  overlay.hidden = false;
+  behindCards.forEach(el => el.setAttribute('inert', ''));   // the page behind can't be clicked or tabbed to
+  firstField.focus();
+}
+function closeCard(overlay) {
+  overlay.hidden = true;
+  behindCards.forEach(el => el.removeAttribute('inert'));
+  const back = focusBeforeCard;
+  focusBeforeCard = null;
+  if (back && back !== document.body && back.isConnected) back.focus();
+  if (document.activeElement !== back) focusInput();   // e.g. the button was in the closed mobile sidebar
+}
+
+function showLogin(mode = 'login') {
+  authMode = mode;
+  const signup = mode === 'signup';
+  document.getElementById('login-title').textContent = signup ? 'CREATE ACCOUNT' : 'LOGIN';
+  document.getElementById('name-row').hidden = !signup;
+  authGo.textContent = signup ? 'Create account' : 'Sign in';
+  authPass.autocomplete = signup ? 'new-password' : 'current-password';
+  authPass.placeholder = signup ? 'password (8+ characters)' : 'password';
+  document.getElementById('auth-switch-text').textContent = signup ? 'have an account?' : 'new here?';
+  document.getElementById('auth-switch').textContent = signup ? 'sign in' : 'create account';
+  authError.textContent = '';
+  const first = signup ? authName : authEmail;
+  if (loginOverlay.hidden) openCard(loginOverlay, first); else first.focus();
+}
+
+async function submitAuth() {
+  if (authWorking) return;
+  authWorking = true;
+  authGo.disabled = true;
+  authError.textContent = '';
+  try {
+    if (authMode === 'signup') await authSignup(authName.value, authEmail.value, authPass.value);
+    else await authLogin(authEmail.value, authPass.value);
+    location.reload();   // reopen with this account's chats
+  } catch (err) {
+    authError.textContent = err.message || 'Something went wrong. Try again.';
+    authWorking = false;
+    authGo.disabled = false;
+  }
+}
+
+function useAsGuest() {
+  if (authWorking) return;
+  writeStore(GUEST_KEY, '1');
+  closeCard(loginOverlay);
+}
+
+authGo.addEventListener('click', submitAuth);
+loginOverlay.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && e.target.tagName === 'INPUT') { e.preventDefault(); submitAuth(); }
+  else if (e.key === 'Escape') { e.preventDefault(); useAsGuest(); }
+});
+document.getElementById('auth-switch').addEventListener('click', () => showLogin(authMode === 'login' ? 'signup' : 'login'));
+document.getElementById('auth-guest').addEventListener('click', useAsGuest);
+
+function showLogout() {
+  document.getElementById('logout-avatar').textContent = currentUser.name.charAt(0).toUpperCase();
+  document.getElementById('logout-name').textContent = currentUser.name;
+  document.getElementById('logout-email').textContent = currentUser.email;
+  openCard(logoutOverlay, document.getElementById('logout-cancel'));
+}
+document.getElementById('logout-cancel').addEventListener('click', () => closeCard(logoutOverlay));
+document.getElementById('logout-go').addEventListener('click', () => { authLogout(); location.reload(); });
+logoutOverlay.addEventListener('keydown', e => { if (e.key === 'Escape') { e.preventDefault(); closeCard(logoutOverlay); } });
+logoutOverlay.addEventListener('click', e => { if (e.target === logoutOverlay) closeCard(logoutOverlay); });
+
+// The bottom of the sidebar: who is using kinSin, with Log in / Log out
+function showUser() {
+  const foot = document.getElementById('side-foot');
+  foot.textContent = '';
+  foot.classList.add('has-user');
+  const chip = document.createElement('div');
+  chip.className = 'user-chip';
+  const avatar = document.createElement('div');
+  avatar.className = 'avatar' + (currentUser ? '' : ' guest');
+  avatar.setAttribute('aria-hidden', 'true');
+  avatar.textContent = currentUser ? currentUser.name.charAt(0).toUpperCase() : '?';
+  const text = document.createElement('div');
+  text.className = 'user-text';
+  const name = document.createElement('b');
+  name.textContent = currentUser ? currentUser.name : 'Guest';
+  const small = document.createElement('span');
+  small.textContent = currentUser ? currentUser.email : 'chats saved in this browser';
+  text.append(name, small);
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.textContent = currentUser ? 'Log out' : 'Log in';
+  btn.addEventListener('click', () => (currentUser ? showLogout() : showLogin()));
+  chip.append(avatar, text, btn);
+  foot.appendChild(chip);
+}
+showUser();
+
 // Start every visit with a fresh chat; saved ones are in the sidebar
 renderChatList();
+
+// First visit: ask to log in (or carry on as a guest)
+if (!currentUser && readStore(GUEST_KEY) !== '1') showLogin();
 </script>
 </body>
 </html>
