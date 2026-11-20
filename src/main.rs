@@ -6,12 +6,15 @@
 //!   cargo run --release -- --serve --whisper-model models/whisper   folder with the Whisper speech model
 //!   cargo run --release -- --serve --db data/kinsin.db   where accounts and saved chats are kept
 //!   cargo run --release -- --serve --secure-cookies   when the site is served over https
+//!   cargo run --release -- --serve --guest-limit 20 --user-limit 100   messages an hour (fair use)
+//!   cargo run --release -- --serve --trust-proxy   behind Cloudflare/nginx: read the client IP from its headers
 //!   cargo run --release -- --model models/other-model.gguf
 //!   cargo run --release -- --context 8192      allow longer conversations
 
 mod accounts;
 mod chat;
 mod engine;
+mod limits;
 mod ocr;
 mod sampler;
 mod server;
@@ -37,6 +40,9 @@ fn main() -> Result<()> {
     let mut whisper_dir = "models/whisper".to_string();
     let mut db_path = "data/kinsin.db".to_string();
     let mut secure_cookies = false;
+    let mut guest_limit: usize = 20;
+    let mut user_limit: usize = 100;
+    let mut trust_proxy = false;
     let mut port: u16 = 8080;
     let mut context: usize = 4096;
 
@@ -54,6 +60,15 @@ fn main() -> Result<()> {
             }
             "--serve" => serve = true,
             "--secure-cookies" => secure_cookies = true,
+            "--trust-proxy" => trust_proxy = true,
+            "--guest-limit" if i + 1 < args.len() => {
+                guest_limit = args[i + 1].parse()?;
+                i += 1;
+            }
+            "--user-limit" if i + 1 < args.len() => {
+                user_limit = args[i + 1].parse()?;
+                i += 1;
+            }
             "--db" if i + 1 < args.len() => {
                 db_path = args[i + 1].clone();
                 i += 1;
@@ -91,7 +106,22 @@ fn main() -> Result<()> {
         // Accounts and saved chats live in one database file
         let accounts = accounts::Accounts::open(Path::new(&db_path))?;
         println!("Accounts: on ({})", db_path);
-        return runtime.block_on(server::serve(engine, model_path, port, ocr, voice, accounts, secure_cookies));
+        println!(
+            "Fair use: one question at a time; {guest_limit} messages an hour for guests, {user_limit} for logged-in users; guests counted by {}",
+            if trust_proxy { "the proxy's client-IP header" } else { "connection IP (add --trust-proxy behind a proxy)" }
+        );
+        let limits = limits::Limits::new(guest_limit, user_limit);
+        return runtime.block_on(server::serve(
+            engine,
+            model_path,
+            port,
+            ocr,
+            voice,
+            accounts,
+            secure_cookies,
+            limits,
+            trust_proxy,
+        ));
     }
 
     let opts = SamplingOptions::default();

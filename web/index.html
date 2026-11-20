@@ -113,6 +113,7 @@
   .msg .body { word-wrap: break-word; }
   .msg.user .body, .msg.error .body { white-space: pre-wrap; }
   .msg .meta { font: 12px var(--mono); color: var(--muted); margin-top: 6px; }
+  .msg .waiting { font: 13px var(--mono); color: var(--muted); }
   .msg.error .body { color: #b3261e; }
   .meta .copy-reply { background: none; border: 0; color: var(--muted); font: inherit; cursor: pointer; padding: 0; text-decoration: underline; }
   /* stats + copy / listen / regenerate: wraps neatly on narrow screens */
@@ -827,8 +828,25 @@ async function generate(chat, { fromSend = false } = {}) {
         if (data === '[DONE]') continue;
         const chunk = JSON.parse(data);
         if (chunk.error) throw new Error(chunk.error.message);
+        // Waiting for others' answers first: show our place in line (0 = our turn now)
+        const position = chunk.kinsin?.queue_position;
+        if (position != null && !reply) {
+          let waiting = bot.querySelector('.waiting');
+          if (position > 0) {
+            if (!waiting) {
+              waiting = document.createElement('div');
+              waiting.className = 'waiting';
+              body.before(waiting);
+            }
+            waiting.textContent = `You're #${position} in line…`;
+            if (bot.isConnected) scrollDown();
+          } else {
+            waiting?.remove();
+          }
+        }
         const piece = chunk.choices?.[0]?.delta?.content;
         if (piece) {
+          bot.querySelector('.waiting')?.remove();
           reply += piece;
           body.innerHTML = renderMarkdown(reply);
           if (bot.isConnected) scrollDown();
@@ -853,6 +871,7 @@ async function generate(chat, { fromSend = false } = {}) {
     }
   } finally {
     cursor.remove();
+    bot.querySelector('.waiting')?.remove();
     // Hand back the Send button first (unless a newer reply already took it)
     const mine = controller === myController;
     if (mine) controller = null;
