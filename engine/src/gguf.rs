@@ -201,6 +201,29 @@ impl Gguf {
         Ok(out)
     }
 
+        /// A weight matrix, kept packed (4-bit stays 4-bit in memory).
+    pub fn matrix(&self, name: &str) -> anyhow::Result<crate::quant::QMatrix> {
+        let info = self.tensors.iter().find(|t| t.name == name).with_context(|| format!("no tensor called {name}"))?;
+        let cols = info.dims[0] as usize; // GGUF lists the shape backwards: numbers per row first
+        let rows: usize = info.dims[1..].iter().product::<u64>() as usize;
+        let row_bytes = crate::quant::row_bytes(info.kind, cols)
+            .with_context(|| format!("{name}: storage type {} isn't supported yet", info.kind))?;
+        let mut file = std::fs::File::open(&self.path)?;
+        file.seek(SeekFrom::Start(self.data_start + info.offset))?;
+        let mut bytes = vec![0u8; rows * row_bytes];
+        file.read_exact(&mut bytes)?;
+        Ok(crate::quant::QMatrix { kind: info.kind, rows, cols, bytes })
+    }
+
+    /// A decimal setting, e.g. get_f32("qwen2.rope.freq_base") -> Some(1000000.0)
+    pub fn get_f32(&self, key: &str) -> Option<f32> {
+        match self.metadata.get(key)? {
+            Value::F32(v) => Some(*v),
+            _ => None,
+        }
+    }
+    
+
     /// A whole-number setting, e.g. get_u32("qwen2.block_count") -> Some(28)
     pub fn get_u32(&self, key: &str) -> Option<u32> {
         match self.metadata.get(key)? {

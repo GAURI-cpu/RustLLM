@@ -75,6 +75,52 @@ pub fn dequantize_q6_k(bytes: &[u8], out: &mut Vec<f32>) {
     }
 }
 
+/// How many bytes one row of `cols` numbers takes in a storage type (None = not supported).
+pub fn row_bytes(kind: u32, cols: usize) -> Option<usize> {
+    match kind {
+        0 => Some(cols * 4),          // F32
+        2 => Some(cols / 32 * 18),    // Q4_0
+        14 => Some(cols / 256 * 210), // Q6_K
+        _ => None,
+    }
+}
+
+/// A weight matrix kept in its packed form. Rows are unpacked only when needed,
+/// so the 1.5B model stays ~1 GB in memory instead of ~6 GB.
+pub struct QMatrix {
+    pub kind: u32,
+    pub rows: usize,
+    pub cols: usize,
+    pub bytes: Vec<u8>,
+}
+
+impl QMatrix {
+    /// Unpack one row into `out`.
+    pub fn row(&self, r: usize, out: &mut Vec<f32>) {
+        let size = row_bytes(self.kind, self.cols).unwrap();
+        let bytes = &self.bytes[r * size..(r + 1) * size];
+        out.clear();
+        match self.kind {
+            0 => out.extend(bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))),
+            2 => dequantize_q4_0(bytes, out),
+            14 => dequantize_q6_k(bytes, out),
+            _ => unreachable!(),
+        }
+    }
+
+    /// y = W · x, unpacking one row at a time.
+    pub fn matvec(&self, x: &[f32]) -> Vec<f32> {
+        assert_eq!(x.len(), self.cols, "vector size doesn't match the matrix");
+        let mut row = Vec::with_capacity(self.cols); // ONE reusable buffer
+        (0..self.rows)
+            .map(|r| {
+                self.row(r, &mut row);
+                row.iter().zip(x).map(|(w, v)| w * v).sum()
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
