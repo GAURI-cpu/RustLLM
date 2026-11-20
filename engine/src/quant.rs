@@ -152,10 +152,22 @@ impl QMatrix {
     }
 }
 
-/// One Q4_0 row · x, straight from the packed bytes (no list of unpacked numbers).
-/// Inside a block every number shares one scale, so: add up (value - 8) × x first,
-/// then multiply by the scale ONCE per block instead of 32 times.
+/// One Q4_0 row · x. Uses AVX2 (8 numbers per instruction) when the CPU has it,
+/// otherwise the plain version. The check is done once and remembered by Rust.
 pub fn dot_q4_0(row: &[u8], x: &[f32]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            // Safe: we just checked that this CPU has AVX2 and FMA
+            return unsafe { dot_q4_0_avx2(row, x) };
+        }
+    }
+    dot_q4_0_scalar(row, x)
+}
+
+/// Plain version: one number at a time. Inside a block every number shares one scale,
+/// so add up (value - 8) × x first, then multiply by the scale ONCE per block.
+pub fn dot_q4_0_scalar(row: &[u8], x: &[f32]) -> f32 {
     let mut total = 0.0;
     for (block, xs) in row.chunks_exact(18).zip(x.chunks_exact(32)) {
         let scale = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
@@ -168,6 +180,46 @@ pub fn dot_q4_0(row: &[u8], x: &[f32]) -> f32 {
         total += sum * scale;
     }
     total
+}
+
+/// AVX2 version: the CPU works on 8 numbers at once, in 256-bit "lanes".
+/// Per block of 32: unpack 32 four-bit values in a few instructions,
+/// turn them into 4 × 8 decimals, and multiply-add them with x 8 at a time.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_q4_0_avx2(row: &[u8], x: &[f32]) -> f32 {
+    use std::arch::x86_64::*;
+    unsafe {
+        let low_4_bits = _mm_set1_epi8(0x0F);
+        let eight = _mm_set1_epi8(8);
+        let mut total = _mm256_setzero_ps(); // 8 running totals, added up at the end
+
+        for (block, xs) in row.chunks_exact(18).zip(x.chunks_exact(32)) {
+            let scale = _mm256_set1_ps(f16_to_f32(u16::from_le_bytes([block[0], block[1]])));
+
+            // 16 packed bytes -> 16 low halves (numbers 0..16) and 16 high halves (16..32)
+            let packed = _mm_loadu_si128(block.as_ptr().add(2) as *const __m128i);
+            let low = _mm_sub_epi8(_mm_and_si128(packed, low_4_bits), eight); // value - 8
+            let high = _mm_sub_epi8(_mm_and_si128(_mm_srli_epi16(packed, 4), low_4_bits), eight);
+
+            // Each group of 8 small whole numbers -> 8 decimals, × 8 numbers of x, added up
+            let x = xs.as_ptr();
+            let to_f32 = |v: __m128i| _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(v));
+            let mut sum = _mm256_mul_ps(to_f32(low), _mm256_loadu_ps(x)); // numbers 0..8
+            sum = _mm256_fmadd_ps(to_f32(_mm_srli_si128(low, 8)), _mm256_loadu_ps(x.add(8)), sum); // 8..16
+            sum = _mm256_fmadd_ps(to_f32(high), _mm256_loadu_ps(x.add(16)), sum); // 16..24
+            sum = _mm256_fmadd_ps(to_f32(_mm_srli_si128(high, 8)), _mm256_loadu_ps(x.add(24)), sum); // 24..32
+
+            // total += sum × scale (still 8 lanes at once)
+            total = _mm256_fmadd_ps(sum, scale, total);
+        }
+
+        // Add the 8 lanes together into one number
+        let half = _mm_add_ps(_mm256_castps256_ps128(total), _mm256_extractf128_ps(total, 1));
+        let quarter = _mm_add_ps(half, _mm_movehl_ps(half, half));
+        let one = _mm_add_ss(quarter, _mm_shuffle_ps(quarter, quarter, 1));
+        _mm_cvtss_f32(one)
+    }
 }
 
 #[cfg(test)]
@@ -236,5 +288,21 @@ mod tests {
         for (a, b) in simple.iter().zip(&fast) {
             assert!((a - b).abs() < 1e-3, "{a} vs {b}");
         }
+    }
+
+    #[test]
+    fn simd_dot_matches_plain_dot() {
+        // 4 blocks (128 numbers) with every possible 4-bit value and varied scales
+        let mut row = Vec::new();
+        for b in 0..4u16 {
+            row.extend_from_slice(&(0x3000u16 + b * 0x0400).to_le_bytes()); // scales 0.125, 0.25, 0.5, 1
+            for j in 0..16u8 {
+                row.push(j.wrapping_mul(17).wrapping_add(b as u8 * 3));
+            }
+        }
+        let x: Vec<f32> = (0..128).map(|i| ((i * 37) % 19) as f32 / 7.0 - 1.3).collect();
+        let plain = dot_q4_0_scalar(&row, &x);
+        let fast = dot_q4_0(&row, &x);
+        assert!((plain - fast).abs() < 1e-3, "{plain} vs {fast}");
     }
 }
