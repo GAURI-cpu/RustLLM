@@ -114,6 +114,24 @@
   .msg.user .body, .msg.error .body { white-space: pre-wrap; }
   .msg .meta { font: 12px var(--mono); color: var(--muted); margin-top: 6px; }
   .msg .waiting { font: 13px var(--mono); color: var(--muted); }
+  .msg .sources { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; font: 12px var(--mono); color: var(--muted); }
+  .sources a {
+    border: 1px solid var(--line); border-radius: 999px; padding: 2px 9px; color: var(--muted); text-decoration: none;
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .sources a:hover, .sources a:focus-visible { color: var(--accent); border-color: var(--accent); }
+  .msg .remembered { margin-top: 8px; font: 12px/1.5 var(--mono); color: var(--muted); overflow-wrap: anywhere; }
+  /* 👍 / 👎: grey until chosen */
+  .act.rate {
+    background: none; border: 0; padding: 0 2px; cursor: pointer; font: 13px/1 var(--sans);
+    filter: grayscale(1); opacity: 0.45;
+  }
+  .act.rate:hover, .act.rate:focus-visible { opacity: 0.85; }
+  .act.rate.on { filter: none; opacity: 1; }
+  .meta .rate-note { color: var(--accent); }
+  .meta .rate-note:empty { display: none; }
+  .fix-box { margin-top: 10px; }
+  .fix-box label { font: 12px var(--mono); color: var(--muted); }
   .msg.error .body { color: #b3261e; }
   .meta .copy-reply { background: none; border: 0; color: var(--muted); font: inherit; cursor: pointer; padding: 0; text-decoration: underline; }
   /* stats + copy / listen / regenerate: wraps neatly on narrow screens */
@@ -435,6 +453,44 @@
     background: none; border: 1px solid var(--line); color: var(--ink); font: 12px var(--mono);
   }
   .user-chip button:hover { border-color: var(--accent); color: var(--accent); }
+  .user-chip .memory-btn { padding: 4px 7px; font-size: 14px; line-height: 1; }
+
+  /* Memory: the same badge, a little wider */
+  .badge.wide { width: min(440px, 100%); }
+  .memory-note {
+    margin: -8px 0 14px; padding: 8px 10px; border-radius: 4px; text-align: center;
+    font: 12px/1.5 var(--mono); color: var(--accent); background: var(--field-fill); border: 1px solid var(--accent);
+  }
+  .memory-note[hidden] { display: none; }
+  .improve-row {
+    display: flex; align-items: flex-start; gap: 10px; margin-bottom: 18px; padding: 10px 12px; border-radius: 4px; cursor: pointer;
+    background: var(--field-fill); border: 1px solid var(--field-border);
+  }
+  .improve-row:focus-within { border-color: var(--accent); }
+  .improve-row input { flex-shrink: 0; width: 16px; height: 16px; margin: 2px 0 0; accent-color: var(--accent); cursor: pointer; }
+  .improve-row span { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+  .improve-row b { font: 600 14px var(--sans); }
+  .improve-row small { font: 11.5px/1.5 var(--mono); color: var(--muted); }
+  .memory-head { margin-bottom: 8px; font: 600 11px var(--mono); letter-spacing: 0.15em; color: var(--muted); }
+  .memory-list {
+    list-style: none; margin: 0 0 12px; padding: 0; max-height: 240px; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .memory-list li {
+    display: flex; align-items: flex-start; gap: 8px; padding: 7px 6px 7px 12px; border-radius: 4px;
+    background: var(--field-fill); border: 1px solid var(--field-border); font: 14px/1.45 var(--sans);
+  }
+  .memory-list li span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .memory-list li button {
+    flex-shrink: 0; width: 26px; height: 26px; margin: -3px 0; border: 0; border-radius: 4px; cursor: pointer;
+    background: none; color: var(--muted); font: 18px/1 var(--sans);
+  }
+  .memory-list li button:hover, .memory-list li button:focus-visible { color: var(--accent); background: var(--field-fill); }
+  .memory-list li.empty-note { background: none; border: 0; padding: 2px 0; font: 12px/1.5 var(--mono); color: var(--muted); }
+  .memory-add { display: flex; gap: 8px; }
+  .memory-add .field { flex: 1; margin: 0; }
+  .memory-add .auth-go { width: auto; padding: 0 18px; }
+  .memory-add + .auth-error { margin: 8px 0; }
 
   /* Phones */
   @media (max-width: 520px) {
@@ -591,6 +647,43 @@
     </div>
   </div>
 
+  <!-- Memory and "Help improve kinSin" (logged-in users) -->
+  <div class="auth-overlay" id="memory-overlay" hidden>
+    <div class="badge wide" role="dialog" aria-modal="true" aria-labelledby="memory-title">
+      <div class="strap"></div><div class="clip"></div>
+      <div class="auth-card">
+        <div class="slot"></div>
+        <div class="auth-brand">
+          <svg viewBox="0 0 64 64" aria-hidden="true">
+            <rect width="64" height="64" rx="16" fill="var(--accent)"/>
+            <path d="M16 14v36M16 36l13-12" fill="none" stroke="var(--logo-k)" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M21 40C23 35.2 24.8 33 26.8 33S30.6 35.2 32.6 40 36.4 47 38.4 47 42.2 44.8 44.2 40 48 33 50 33" fill="none" stroke="var(--logo-wave)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <span>kin<span>Sin</span></span>
+        </div>
+        <h2 class="auth-title" id="memory-title">MEMORY</h2>
+        <p class="memory-note" id="memory-note" role="status" hidden></p>
+        <label class="improve-row">
+          <input type="checkbox" id="improve-box">
+          <span>
+            <b>Help improve kinSin</b>
+            <small>Rate answers with 👍 / 👎 and suggest better ones. Liked and corrected answers may be used to train kinSin. Answers that used live Wikipedia data never are.</small>
+          </span>
+        </label>
+        <div class="memory-head">WHAT KINSIN REMEMBERS ABOUT YOU</div>
+        <ul class="memory-list" id="memory-list"></ul>
+        <div class="memory-add">
+          <label class="field">
+            <input id="memory-input" placeholder="e.g. I prefer short answers" aria-label="Something for kinSin to remember" maxlength="300">
+          </label>
+          <button type="button" class="auth-go" id="memory-add">Add</button>
+        </div>
+        <div class="auth-error" id="memory-error" role="alert"></div>
+        <button type="button" class="auth-ghost" id="memory-close">Close</button>
+      </div>
+    </div>
+  </div>
+
 <script>
 const thread = document.getElementById('thread');
 const scroller = document.getElementById('scroller');
@@ -623,7 +716,7 @@ let controller = null;     // lets the Stop button cancel the request
 // --- Accounts (on the kinSin server: /v1/auth/...) ---
 // The server keeps the login in an HttpOnly cookie that page scripts can't read.
 // This browser only caches who is logged in, so the right chats show at once.
-const SESSION_KEY = 'kinsin-user';        // { email, name } of whoever is logged in
+const SESSION_KEY = 'kinsin-user';        // { email, name, improve } of whoever is logged in
 const GUEST_KEY = 'kinsin-guest';         // '1' once someone chose "use as guest"
 const GUEST_CHATS = 'kinsin-chats';
 function readStore(key) { try { return localStorage.getItem(key); } catch { return null; } }
@@ -635,12 +728,15 @@ function writeStore(key, value) {
 const currentUser = (() => {
   try {
     const u = JSON.parse(readStore(SESSION_KEY));
-    return u && typeof u.email === 'string' && typeof u.name === 'string' ? { email: u.email, name: u.name } : null;
+    return u && typeof u.email === 'string' && typeof u.name === 'string'
+      ? { email: u.email, name: u.name, improve: u.improve === true }
+      : null;
   } catch { return null; }   // e.g. an old plain-email value: log in again
 })();
 
 // --- Saved chats ---
-// chats: [{ id, title, updated, messages: [{ role, content, meta? }] }], newest first when listed.
+// chats: [{ id, title, updated, messages: [...] }], newest first when listed.
+// An assistant message: { role, content, meta, sources?, memorySaved?, rating? (1 / -1), corrected? }
 // current: the open chat. A new chat only joins `chats` once its first message is sent.
 const STORE_KEY = currentUser ? 'kinsin-chats:' + currentUser.email : GUEST_CHATS;
 let chats = loadChats();
@@ -665,12 +761,23 @@ function cleanChats(data) {
         updated: Number(c.updated) || 0,
         messages: c.messages
           .filter(m => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
-          .map(m => m.role === 'assistant'
-            ? { role: m.role, content: m.content, meta: typeof m.meta === 'string' ? m.meta : '' }
-            : userMessageFrom(m)),
+          .map(m => m.role === 'assistant' ? assistantMessageFrom(m) : userMessageFrom(m)),
       }))
       .filter(c => c.messages.length);
   } catch { return []; }
+}
+function assistantMessageFrom(m) {
+  const a = { role: 'assistant', content: m.content, meta: typeof m.meta === 'string' ? m.meta : '' };
+  const sources = safeSources(m.sources);
+  if (sources.length) a.sources = sources;
+  const facts = cleanFacts(m.memorySaved);
+  if (facts.length) a.memorySaved = facts;
+  if (m.rating === 1 || m.rating === -1) a.rating = m.rating;
+  if (typeof m.corrected === 'string' && m.corrected.trim()) a.corrected = m.corrected.slice(0, 8000);
+  return a;
+}
+function cleanFacts(list) {
+  return Array.isArray(list) ? list.filter(f => typeof f === 'string' && f).slice(0, 10).map(f => f.slice(0, 300)) : [];
 }
 let syncTimer = null;      // pending upload of the chats to the server
 function saveChats() {
@@ -739,6 +846,8 @@ function renderThread() {
     const el = addMessage('assistant', '');
     el.dataset.index = i;
     el.querySelector('.body').innerHTML = renderMarkdown(m.content);
+    if (m.sources) showSources(el, m.sources);
+    if (m.memorySaved) showRemembered(el, m.memorySaved);
     if (m.meta) meta(el, m.meta);
     addReplyCopy(el, m.content);
   });
@@ -800,6 +909,8 @@ async function generate(chat, { fromSend = false } = {}) {
   let metaText = '';
   let aborted = false;
   let failure = '';
+  let sources = [];
+  let memorySaved = [];
   const started = performance.now();
 
   try {
@@ -828,6 +939,16 @@ async function generate(chat, { fromSend = false } = {}) {
         if (data === '[DONE]') continue;
         const chunk = JSON.parse(data);
         if (chunk.error) throw new Error(chunk.error.message);
+        // Looked up on Wikipedia: show where from, right away
+        if (chunk.kinsin?.sources) {
+          sources = safeSources(chunk.kinsin.sources);
+          showSources(bot, sources);
+        }
+        // Facts kinSin will remember from this question
+        if (chunk.kinsin?.memory_saved) {
+          memorySaved = cleanFacts(chunk.kinsin.memory_saved);
+          showRemembered(bot, memorySaved);
+        }
         // Waiting for others' answers first: show our place in line (0 = our turn now)
         const position = chunk.kinsin?.queue_position;
         if (position != null && !reply) {
@@ -880,7 +1001,10 @@ async function generate(chat, { fromSend = false } = {}) {
     if (reply) {
       // Finished, stopped or failed part-way: keep what arrived, so it can be regenerated
       addReplyCopy(bot, reply);
-      chat.messages.push({ role: 'assistant', content: reply, meta: metaText });
+      const saved = { role: 'assistant', content: reply, meta: metaText };
+      if (sources.length) saved.sources = sources;
+      if (memorySaved.length) saved.memorySaved = memorySaved;
+      chat.messages.push(saved);
       chat.updated = Date.now();
       if (shown && !bot.isConnected) renderThread();   // switched away and back mid-reply
     } else if (aborted) {
@@ -1135,12 +1259,159 @@ function metaLine(el) {
   return m;
 }
 function meta(el, text) { metaLine(el).querySelector('.stats').textContent = text; }
+
+// The Wikipedia pages a reply was based on: "live:" + pill links, under the answer.
+// Only http(s) links, built with textContent (never innerHTML), at most 5.
+function safeSources(list) {
+  if (!Array.isArray(list)) return [];
+  return list.filter(s => {
+    if (!s || typeof s.name !== 'string' || typeof s.url !== 'string') return false;
+    try { return ['http:', 'https:'].includes(new URL(s.url).protocol); } catch { return false; }
+  }).slice(0, 5).map(s => ({ kind: String(s.kind || ''), name: s.name, url: s.url }));
+}
+function showSources(el, list) {
+  const sources = safeSources(list);
+  el.querySelector('.sources')?.remove();
+  if (!sources.length) return;
+  const row = document.createElement('div');
+  row.className = 'sources';
+  const label = document.createElement('span');
+  label.textContent = 'live:';
+  row.appendChild(label);
+  for (const s of sources) {
+    const a = document.createElement('a');
+    a.href = s.url;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.textContent = '🔎 ' + s.name;
+    a.title = s.url;
+    row.appendChild(a);
+  }
+  const metaEl = el.querySelector('.meta');
+  if (metaEl) metaEl.before(row); else el.appendChild(row);
+}
 function addReplyCopy(el, raw) {
   el.rawReply = raw;
   const m = metaLine(el);
   if (!m.querySelector('.copy-reply')) m.insertAdjacentHTML('beforeend', '<button type="button" class="copy-reply">copy</button>');
   if (canSpeak && !m.querySelector('.listen-btn')) m.insertAdjacentHTML('beforeend', '<button type="button" class="listen-btn">listen</button>');
+  if (currentUser && !m.querySelector('.rate')) {
+    m.insertAdjacentHTML('beforeend',
+      '<button type="button" class="act rate" data-rate="up" aria-label="Good answer" title="Good answer" aria-pressed="false">👍</button>' +
+      '<button type="button" class="act rate" data-rate="down" aria-label="Bad answer" title="Bad answer" aria-pressed="false">👎</button>' +
+      '<span class="rate-note" role="status"></span>');
+  }
+  showRating(el);
 }
+
+// Light up 👍 or 👎 to match the saved rating of the answer in `el`
+function showRating(el) {
+  const msg = current.messages[Number(el.dataset.index)];
+  const rating = msg?.role === 'assistant' ? msg.rating : 0;
+  el.querySelectorAll('.rate').forEach(b => {
+    const on = (b.dataset.rate === 'up' && rating === 1) || (b.dataset.rate === 'down' && rating === -1);
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+}
+
+// "🧠 Remembered: …" under an answer
+function showRemembered(el, facts) {
+  el.querySelector('.remembered')?.remove();
+  const list = cleanFacts(facts);
+  if (!list.length) return;
+  const row = document.createElement('div');
+  row.className = 'remembered';
+  row.textContent = '🧠 Remembered: ' + list.join(' ');
+  const metaEl = el.querySelector('.meta');
+  if (metaEl) metaEl.before(row); else el.appendChild(row);
+}
+
+// --- 👍 / 👎 (logged-in users who turned on "Help improve kinSin") ---
+// Sends the rating with the conversation up to that answer. Returns true if it was saved.
+async function sendRating(chat, index, el, rating, corrected) {
+  const msg = chat.messages[index];
+  if (!msg || msg.role !== 'assistant') return false;
+  const note = el.querySelector('.rate-note');
+  try {
+    await api('/v1/feedback', {
+      chat_id: chat.id,
+      index,
+      rating,
+      corrected: corrected || null,
+      live: !!msg.sources?.length,
+      messages: chat.messages.slice(0, index + 1).map(({ role, content }) => ({ role, content })),
+    });
+    if (rating) msg.rating = rating; else delete msg.rating;
+    if (corrected) msg.corrected = corrected; else delete msg.corrected;
+    saveChats();
+    if (note) note.textContent = '';
+    showRating(el);
+    return true;
+  } catch (err) {
+    if (err.status === 401) { loggedOutElsewhere(); return false; }
+    if (note) note.textContent = err.message;
+    return false;
+  }
+}
+
+// After 👎: an optional box for the answer kinSin should have given
+function openBetterAnswer(el, chat, index) {
+  el.querySelector('.fix-box')?.remove();
+  const box = document.createElement('div');
+  box.className = 'fix-box edit-box';
+  const label = document.createElement('label');
+  label.textContent = 'What should kinSin have said? (optional, this teaches it the most)';
+  const text = document.createElement('textarea');
+  text.className = 'edit-input';
+  text.maxLength = 8000;
+  text.value = chat.messages[index]?.corrected || '';
+  label.htmlFor = text.id = 'better-' + chat.id + '-' + index;
+  const buttons = document.createElement('div');
+  buttons.className = 'edit-buttons';
+  const skip = document.createElement('button');
+  skip.type = 'button';
+  skip.textContent = 'Skip';
+  const save = document.createElement('button');
+  save.type = 'button';
+  save.className = 'edit-save';
+  save.textContent = 'Save better answer';
+  buttons.append(skip, save);
+  box.append(label, text, buttons);
+  el.appendChild(box);
+  text.focus();
+
+  skip.addEventListener('click', () => box.remove());
+  text.addEventListener('keydown', e => { if (e.key === 'Escape') { e.preventDefault(); box.remove(); } });
+  save.addEventListener('click', async () => {
+    const better = text.value.trim();
+    if (!better) { box.remove(); return; }
+    save.disabled = true;
+    if (await sendRating(chat, index, el, -1, better)) box.remove();
+    else save.disabled = false;
+  });
+}
+
+thread.addEventListener('click', e => {
+  const btn = e.target.closest('.rate');
+  if (!btn || !currentUser) return;
+  const el = btn.closest('.msg.assistant');
+  const index = Number(el?.dataset.index);
+  const chat = current;
+  const msg = chat.messages[index];
+  if (!msg || msg.role !== 'assistant') return;
+  if (!currentUser.improve) {
+    openMemory('To rate answers, first turn on “Help improve kinSin” below.');
+    return;
+  }
+  if (btn.dataset.rate === 'up') {
+    el.querySelector('.fix-box')?.remove();
+    sendRating(chat, index, el, msg.rating === 1 ? 0 : 1, null);
+  } else {
+    sendRating(chat, index, el, -1, msg.corrected || null);
+    openBetterAnswer(el, chat, index);
+  }
+});
 
 // --- Copy buttons (one delegated listener for every message) ---
 async function copyText(text) {
@@ -1802,7 +2073,7 @@ function rememberUser(user) {
   const mine = 'kinsin-chats:' + user.email;
   const guestChats = readStore(GUEST_CHATS);
   if (guestChats && guestChats !== '[]' && !readStore(mine) && writeStore(mine, guestChats)) writeStore(GUEST_CHATS, null);
-  if (!writeStore(SESSION_KEY, JSON.stringify({ email: user.email, name: user.name }))) {
+  if (!writeStore(SESSION_KEY, JSON.stringify({ email: user.email, name: user.name, improve: user.improve === true }))) {
     throw new Error('This browser blocked saving. Is it in private mode?');
   }
 }
@@ -1860,6 +2131,7 @@ async function syncFromServer() {
   try {
     const { user } = await api('/v1/auth/me', undefined, 'GET');
     if (user?.email !== currentUser.email) { loggedOutElsewhere(); return; }
+    setImprove(user.improve === true);   // may have been changed on another device
     const serverChats = cleanChats(await api('/v1/chats', undefined, 'GET'));
     if (serverChats.length) {
       // The server has the newest copy (from this or another device)
@@ -1972,6 +2244,138 @@ document.getElementById('logout-go').addEventListener('click', async e => {
 logoutOverlay.addEventListener('keydown', e => { if (e.key === 'Escape') { e.preventDefault(); closeCard(logoutOverlay); } });
 logoutOverlay.addEventListener('click', e => { if (e.target === logoutOverlay) closeCard(logoutOverlay); });
 
+// ---------- Memory card: what kinSin remembers, and "Help improve kinSin" ----------
+const memoryOverlay = document.getElementById('memory-overlay');
+const memoryNote = document.getElementById('memory-note');
+const improveBox = document.getElementById('improve-box');
+const memoryList = document.getElementById('memory-list');
+const memoryInput = document.getElementById('memory-input');
+const memoryAdd = document.getElementById('memory-add');
+const memoryError = document.getElementById('memory-error');
+
+// Keep the cached user in step with the server
+function setImprove(on) {
+  if (!currentUser) return;
+  if (currentUser.improve !== on) {
+    currentUser.improve = on;
+    writeStore(SESSION_KEY, JSON.stringify(currentUser));
+  }
+  improveBox.checked = on;
+}
+
+// Turning "improve" off deletes the ratings on the server: forget them here too
+function clearRatings() {
+  for (const chat of chats) {
+    for (const m of chat.messages) { delete m.rating; delete m.corrected; }
+  }
+  saveChats();
+  thread.querySelectorAll('.msg.assistant').forEach(showRating);
+  thread.querySelectorAll('.fix-box').forEach(b => b.remove());
+}
+
+// list: null = still loading
+function renderMemories(list) {
+  memoryList.textContent = '';
+  if (!list || !list.length) {
+    const li = document.createElement('li');
+    li.className = 'empty-note';
+    li.textContent = list ? 'Nothing yet. Say things like “my name is …” or “I prefer short answers”, or add one below.' : 'Loading…';
+    memoryList.appendChild(li);
+    return;
+  }
+  for (const m of list) {
+    if (!m || typeof m.text !== 'string') continue;
+    const li = document.createElement('li');
+    const text = document.createElement('span');
+    text.textContent = m.text;
+    const forget = document.createElement('button');
+    forget.type = 'button';
+    forget.textContent = '×';
+    forget.setAttribute('aria-label', 'Forget: ' + m.text);
+    forget.title = 'Forget this';
+    forget.addEventListener('click', async () => {
+      forget.disabled = true;
+      memoryError.textContent = '';
+      try {
+        await api('/v1/memories/' + encodeURIComponent(m.id), undefined, 'DELETE');
+        li.remove();
+        if (!memoryList.children.length) renderMemories([]);
+        else memoryInput.focus();
+      } catch (err) {
+        if (err.status === 401) { loggedOutElsewhere(); return; }
+        memoryError.textContent = err.message;
+        forget.disabled = false;
+      }
+    });
+    li.append(text, forget);
+    memoryList.appendChild(li);
+  }
+}
+
+async function openMemory(note = '') {
+  if (!currentUser) return;
+  memoryNote.textContent = note;
+  memoryNote.hidden = !note;
+  memoryError.textContent = '';
+  improveBox.checked = currentUser.improve;
+  renderMemories(null);
+  if (memoryOverlay.hidden) openCard(memoryOverlay, note ? improveBox : memoryInput);
+  try {
+    const data = await api('/v1/memories', undefined, 'GET');
+    setImprove(data.improve === true);
+    renderMemories(Array.isArray(data.memories) ? data.memories : []);
+  } catch (err) {
+    if (err.status === 401) { loggedOutElsewhere(); return; }
+    memoryError.textContent = err.message;
+    renderMemories([]);
+  }
+}
+
+async function addMemory() {
+  const text = memoryInput.value.trim();
+  if (!text) { memoryInput.focus(); return; }
+  memoryAdd.disabled = true;
+  memoryError.textContent = '';
+  try {
+    const data = await api('/v1/memories', { text });
+    if (data.saved) memoryInput.value = '';
+    else memoryError.textContent = 'kinSin already remembers that.';
+    renderMemories(Array.isArray(data.memories) ? data.memories : []);
+  } catch (err) {
+    if (err.status === 401) { loggedOutElsewhere(); return; }
+    memoryError.textContent = err.message;
+  }
+  memoryAdd.disabled = false;
+  memoryInput.focus();
+}
+
+improveBox.addEventListener('change', async () => {
+  const on = improveBox.checked;
+  if (!on && !confirm('Turn off “Help improve kinSin”?\n\nAll your 👍 / 👎 ratings and better answers will be deleted from the server.')) {
+    improveBox.checked = true;
+    return;
+  }
+  improveBox.disabled = true;
+  memoryError.textContent = '';
+  try {
+    const { user } = await api('/v1/settings', { improve: on }, 'PUT');
+    setImprove(user?.improve === true);
+    if (!on) clearRatings();
+    memoryNote.textContent = on ? 'Thank you! You can rate answers now.' : '';
+    memoryNote.hidden = !on;
+  } catch (err) {
+    if (err.status === 401) { loggedOutElsewhere(); return; }
+    improveBox.checked = !on;
+    memoryError.textContent = err.message;
+  }
+  improveBox.disabled = false;
+});
+memoryAdd.addEventListener('click', addMemory);
+memoryInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addMemory(); } });
+document.getElementById('memory-close').addEventListener('click', () => closeCard(memoryOverlay));
+memoryOverlay.addEventListener('keydown', e => { if (e.key === 'Escape') { e.preventDefault(); closeCard(memoryOverlay); } });
+memoryOverlay.addEventListener('click', e => { if (e.target === memoryOverlay) closeCard(memoryOverlay); });
+
 // The bottom of the sidebar: who is using kinSin, with Log in / Log out
 function showUser() {
   const foot = document.getElementById('side-foot');
@@ -1994,7 +2398,18 @@ function showUser() {
   btn.type = 'button';
   btn.textContent = currentUser ? 'Log out' : 'Log in';
   btn.addEventListener('click', () => (currentUser ? showLogout() : showLogin()));
-  chip.append(avatar, text, btn);
+  chip.append(avatar, text);
+  if (currentUser) {
+    const memory = document.createElement('button');
+    memory.type = 'button';
+    memory.className = 'memory-btn';
+    memory.textContent = '🧠';
+    memory.title = 'Memory: what kinSin remembers about you';
+    memory.setAttribute('aria-label', 'Memory');
+    memory.addEventListener('click', () => openMemory());
+    chip.appendChild(memory);
+  }
+  chip.appendChild(btn);
   foot.appendChild(chip);
 }
 showUser();

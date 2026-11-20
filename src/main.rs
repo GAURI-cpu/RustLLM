@@ -8,6 +8,9 @@
 //!   cargo run --release -- --serve --secure-cookies   when the site is served over https
 //!   cargo run --release -- --serve --guest-limit 20 --user-limit 100   messages an hour (fair use)
 //!   cargo run --release -- --serve --trust-proxy   behind Cloudflare/nginx: read the client IP from its headers
+//!   cargo run --release -- --serve --no-live   never look anything up on Wikipedia
+//!   cargo run --release -- --export-training data/train.jsonl   write the 👍 / corrected answers of users
+//!                                                who turned on "Help improve kinSin" (JSONL), then exit
 //!   cargo run --release -- --model models/other-model.gguf
 //!   cargo run --release -- --context 8192      allow longer conversations
 
@@ -15,9 +18,11 @@ mod accounts;
 mod chat;
 mod engine;
 mod limits;
+mod memory;
 mod ocr;
 mod sampler;
 mod server;
+mod tools;
 mod voice;
 
 use std::io::Write;
@@ -43,6 +48,8 @@ fn main() -> Result<()> {
     let mut guest_limit: usize = 20;
     let mut user_limit: usize = 100;
     let mut trust_proxy = false;
+    let mut live = true;
+    let mut export_training: Option<String> = None;
     let mut port: u16 = 8080;
     let mut context: usize = 4096;
 
@@ -61,6 +68,11 @@ fn main() -> Result<()> {
             "--serve" => serve = true,
             "--secure-cookies" => secure_cookies = true,
             "--trust-proxy" => trust_proxy = true,
+            "--no-live" => live = false,
+            "--export-training" if i + 1 < args.len() => {
+                export_training = Some(args[i + 1].clone());
+                i += 1;
+            }
             "--guest-limit" if i + 1 < args.len() => {
                 guest_limit = args[i + 1].parse()?;
                 i += 1;
@@ -94,6 +106,16 @@ fn main() -> Result<()> {
         i += 1;
     }
 
+    // Write the training set from users' ratings, then stop (no model needed)
+    if let Some(path) = export_training {
+        let accounts = accounts::Accounts::open(Path::new(&db_path))?;
+        let mut out = std::io::BufWriter::new(std::fs::File::create(&path)?);
+        let count = accounts.export_training(chat::SYSTEM_PROMPT, &mut out)?;
+        out.flush()?;
+        println!("Wrote {count} conversations to {path}");
+        return Ok(());
+    }
+
     println!("AVX enabled: {}", candle_core::utils::with_avx());
     println!("Loading {} ...", model_path);
     let mut engine = Engine::load(&model_path, &tokenizer_path, context)?;
@@ -111,6 +133,9 @@ fn main() -> Result<()> {
             if trust_proxy { "the proxy's client-IP header" } else { "connection IP (add --trust-proxy behind a proxy)" }
         );
         let limits = limits::Limits::new(guest_limit, user_limit);
+        // Live knowledge: Wikipedia is the only outside website the server contacts
+        let tools = live.then(|| tools::Tools::new(tools::Urls::default()));
+        println!("Live knowledge: {}", if live { "on (Wikipedia)" } else { "off" });
         return runtime.block_on(server::serve(
             engine,
             model_path,
@@ -121,6 +146,7 @@ fn main() -> Result<()> {
             secure_cookies,
             limits,
             trust_proxy,
+            tools,
         ));
     }
 
