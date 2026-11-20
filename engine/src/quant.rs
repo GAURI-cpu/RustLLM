@@ -1,4 +1,5 @@
-//! Unpacking squeezed (quantized) weights back into normal f32 numbers.
+//! Unpacking squeezed (quantized) weights back into normal f32 numbers,
+//! and multiplying with them.
 
 /// Half-precision (16-bit) decimal -> normal 32-bit decimal, by hand.
 /// f16 bits: 1 sign | 5 exponent | 10 fraction
@@ -38,7 +39,7 @@ pub fn dequantize_q4_0(bytes: &[u8], out: &mut Vec<f32>) {
             out.push(((byte >> 4) as i32 - 8) as f32 * scale);
         }
     }
-} 
+}
 
 /// Q6_K: blocks of 256 numbers in 210 bytes:
 ///   ql[128] low 4 bits · qh[64] high 2 bits · scales[16] (one per 16 numbers) · d (f16)
@@ -108,10 +109,9 @@ impl QMatrix {
         }
     }
 
-    /// y = W · x, unpacking one row at a time.
-    pub fn matvec(&self, x: &[f32]) -> Vec<f32> {
-        assert_eq!(x.len(), self.cols, "vector size doesn't match the matrix");
-        let mut row = Vec::with_capacity(self.cols); // ONE reusable buffer
+    /// The old, simple version (kept to compare speed and results).
+    pub fn matvec_simple(&self, x: &[f32]) -> Vec<f32> {
+        let mut row = Vec::with_capacity(self.cols);
         (0..self.rows)
             .map(|r| {
                 self.row(r, &mut row);
@@ -119,6 +119,55 @@ impl QMatrix {
             })
             .collect()
     }
+
+    /// One row · x. Q4_0 rows are multiplied straight from their packed bytes.
+    fn row_dot(&self, r: usize, x: &[f32], buf: &mut Vec<f32>) -> f32 {
+        if self.kind == 2 {
+            let size = row_bytes(2, self.cols).unwrap();
+            return dot_q4_0(&self.bytes[r * size..(r + 1) * size], x);
+        }
+        self.row(r, buf);
+        buf.iter().zip(x).map(|(w, v)| w * v).sum()
+    }
+
+    /// y = W · x, with the rows shared out between all CPU cores.
+    pub fn matvec(&self, x: &[f32]) -> Vec<f32> {
+        assert_eq!(x.len(), self.cols, "vector size doesn't match the matrix");
+        let mut y = vec![0.0; self.rows];
+        let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        let per_core = self.rows.div_ceil(cores);
+        std::thread::scope(|s| {
+            // Each core gets its own slice of y to fill: no two cores ever write the same place
+            for (i, part) in y.chunks_mut(per_core).enumerate() {
+                s.spawn(move || {
+                    let first_row = i * per_core;
+                    let mut buf = Vec::with_capacity(self.cols);
+                    for (j, out) in part.iter_mut().enumerate() {
+                        *out = self.row_dot(first_row + j, x, &mut buf);
+                    }
+                });
+            }
+        });
+        y
+    }
+}
+
+/// One Q4_0 row · x, straight from the packed bytes (no list of unpacked numbers).
+/// Inside a block every number shares one scale, so: add up (value - 8) × x first,
+/// then multiply by the scale ONCE per block instead of 32 times.
+pub fn dot_q4_0(row: &[u8], x: &[f32]) -> f32 {
+    let mut total = 0.0;
+    for (block, xs) in row.chunks_exact(18).zip(x.chunks_exact(32)) {
+        let scale = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
+        let mut sum = 0.0;
+        for j in 0..16 {
+            let byte = block[2 + j];
+            sum += ((byte & 0x0F) as i32 - 8) as f32 * xs[j]; // numbers 0..16
+            sum += ((byte >> 4) as i32 - 8) as f32 * xs[j + 16]; // numbers 16..32
+        }
+        total += sum * scale;
+    }
+    total
 }
 
 #[cfg(test)]
@@ -135,7 +184,8 @@ mod tests {
         assert_eq!(f16_to_f32(0x0001), 1.0 / 16_777_216.0); // the smallest f16
         assert!(f16_to_f32(0x7C00).is_infinite());
     }
-        #[test]
+
+    #[test]
     fn q4_0_one_block() {
         // scale = 0.5 (f16 0x3800), first byte 0x9C, every other byte 0x88 (= value 8 → 0.0)
         let mut block = vec![0x00, 0x38, 0x9C];
@@ -143,12 +193,12 @@ mod tests {
         let mut out = Vec::new();
         dequantize_q4_0(&block, &mut out);
         assert_eq!(out.len(), 32);
-        assert_eq!(out[0], 2.0);  // low half of 0x9C = 12 → (12 - 8) × 0.5
+        assert_eq!(out[0], 2.0); // low half of 0x9C = 12 → (12 - 8) × 0.5
         assert_eq!(out[16], 0.5); // high half of 0x9C = 9 → (9 - 8) × 0.5
-        assert_eq!(out[1], 0.0);  // 8 → (8 - 8) × 0.5
+        assert_eq!(out[1], 0.0); // 8 → (8 - 8) × 0.5
     }
 
-        #[test]
+    #[test]
     fn q6_k_one_block() {
         let mut block = vec![0u8; 210];
         for s in &mut block[192..208] {
@@ -166,5 +216,25 @@ mod tests {
         assert_eq!(out[64], -30.0); // 2 - 32
         assert_eq!(out[32], -64.0); // (0 - 32) × scale 2
         assert_eq!(out[200], -32.0); // all-zero bits → 0 - 32
+    }
+
+    #[test]
+    fn fast_matvec_gives_the_same_answer() {
+        // A 64 × 64 Q4_0 matrix with varied bytes, scale 0.25 everywhere
+        let (rows, cols) = (64, 64);
+        let mut bytes = Vec::new();
+        for i in 0..rows * cols / 32 {
+            bytes.extend_from_slice(&[0x00, 0x34]); // 0x3400 = 0.25
+            for j in 0..16 {
+                bytes.push(((i * 31 + j * 7) % 256) as u8);
+            }
+        }
+        let m = QMatrix { kind: 2, rows, cols, bytes };
+        let x: Vec<f32> = (0..cols).map(|i| (i as f32 - 32.0) / 10.0).collect();
+        let simple = m.matvec_simple(&x);
+        let fast = m.matvec(&x);
+        for (a, b) in simple.iter().zip(&fast) {
+            assert!((a - b).abs() < 1e-3, "{a} vs {b}");
+        }
     }
 }
