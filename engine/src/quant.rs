@@ -119,6 +119,8 @@ impl QMatrix {
             assert_eq!(x.len(), self.cols, "vector size doesn't match the matrix");
         }
         const ROWS_PER_JOB: usize = 16;
+        // Round every word to 8-bit blocks once (Q4_0 only)
+        let q8s: Vec<Option<Q8Vector>> = xs.iter().map(|x| (self.kind == 2).then(|| quantize_q8_0(x))).collect();
         // Results stored row by row: flat[r * n + t] = row r · xs[t]
         let mut flat = vec![0.0; self.rows * n];
         flat.par_chunks_mut(ROWS_PER_JOB * n).enumerate().for_each(|(job, part)| {
@@ -126,7 +128,7 @@ impl QMatrix {
             for (j, out_row) in part.chunks_mut(n).enumerate() {
                 let r = job * ROWS_PER_JOB + j;
                 for (t, out) in out_row.iter_mut().enumerate() {
-                    *out = self.row_dot(r, &xs[t], &mut buf); // same row bytes, still in cache
+                    *out = self.row_dot(r, &xs[t], q8s[t].as_ref(), &mut buf); // same row bytes, still in cache
                 }
             }
         });
@@ -145,13 +147,15 @@ impl QMatrix {
             .collect()
     }
 
-    /// One row · x. Q4_0 rows are multiplied straight from their packed bytes.
-    fn row_dot(&self, r: usize, x: &[f32], buf: &mut Vec<f32>) -> f32 {
+    /// One row · x. Q4_0 rows use integer maths with the rounded word (q8);
+    /// Q6_K rows are multiplied straight from their packed bytes.
+    fn row_dot(&self, r: usize, x: &[f32], q8: Option<&Q8Vector>, buf: &mut Vec<f32>) -> f32 {
         let size = row_bytes(self.kind, self.cols).unwrap();
         let row = &self.bytes[r * size..(r + 1) * size];
-        match self.kind {
-            2 => return dot_q4_0(row, x),
-            14 => return dot_q6_k(row, x),
+        match (self.kind, q8) {
+            (2, Some(q8)) => return dot_q4_0_q8_0(row, q8),
+            (2, None) => return dot_q4_0(row, x),
+            (14, _) => return dot_q6_k(row, x),
             _ => {}
         }
         self.row(r, buf);
@@ -165,11 +169,13 @@ impl QMatrix {
         use rayon::prelude::*;
         assert_eq!(x.len(), self.cols, "vector size doesn't match the matrix");
         const ROWS_PER_JOB: usize = 16; // small jobs, so even 256-row matrices keep 16 cores busy
+        // Round the word to 8-bit blocks ONCE, then reuse it for every row (Q4_0 only)
+        let q8 = (self.kind == 2).then(|| quantize_q8_0(x));
         let mut y = vec![0.0; self.rows];
         y.par_chunks_mut(ROWS_PER_JOB).enumerate().for_each(|(job, part)| {
-            let mut buf = Vec::new(); // only used by non-Q4_0 rows
+            let mut buf = Vec::new(); // only used by F32 rows
             for (j, out) in part.iter_mut().enumerate() {
-                *out = self.row_dot(job * ROWS_PER_JOB + j, x, &mut buf);
+                *out = self.row_dot(job * ROWS_PER_JOB + j, x, q8.as_ref(), &mut buf);
             }
         });
         y
@@ -321,6 +327,98 @@ unsafe fn dot_q6_k_avx2(row: &[u8], x: &[f32]) -> f32 {
     }
 }
 
+// ---------- Step 6.6: integer maths ----------
+
+/// A word rounded to "Q8_0": every 32 numbers share one scale, and each number
+/// becomes a small whole number between -127 and 127.
+pub struct Q8Vector {
+    pub scales: Vec<f32>, // one per block of 32
+    pub values: Vec<i8>,  // number ≈ value × scale
+}
+
+/// Round a word's numbers into Q8_0 blocks (done once per matrix multiplication).
+pub fn quantize_q8_0(x: &[f32]) -> Q8Vector {
+    let mut scales = Vec::with_capacity(x.len() / 32);
+    let mut values = Vec::with_capacity(x.len());
+    for block in x.chunks_exact(32) {
+        let biggest = block.iter().fold(0f32, |m, v| m.max(v.abs()));
+        let scale = biggest / 127.0; // the biggest number becomes ±127
+        let inverse = if scale > 0.0 { 1.0 / scale } else { 0.0 };
+        scales.push(scale);
+        values.extend(block.iter().map(|v| (v * inverse).round() as i8));
+    }
+    Q8Vector { scales, values }
+}
+
+/// One Q4_0 row · a Q8_0 word, with WHOLE-NUMBER maths.
+/// Per block: weight_scale × word_scale × Σ (weight_int × word_int)
+pub fn dot_q4_0_q8_0(row: &[u8], x: &Q8Vector) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            return unsafe { dot_q4_0_q8_0_avx2(row, x) };
+        }
+    }
+    dot_q4_0_q8_0_scalar(row, x)
+}
+
+/// Plain version: one pair at a time, but all in whole numbers.
+pub fn dot_q4_0_q8_0_scalar(row: &[u8], x: &Q8Vector) -> f32 {
+    let mut total = 0.0;
+    for (b, block) in row.chunks_exact(18).enumerate() {
+        let w_scale = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
+        let xs = &x.values[b * 32..b * 32 + 32];
+        let mut sum: i32 = 0;
+        for j in 0..16 {
+            let byte = block[2 + j];
+            sum += ((byte & 0x0F) as i32 - 8) * xs[j] as i32; // numbers 0..16
+            sum += ((byte >> 4) as i32 - 8) * xs[j + 16] as i32; // numbers 16..32
+        }
+        total += w_scale * x.scales[b] * sum as f32; // scales applied ONCE per block
+    }
+    total
+}
+
+/// AVX2 version: 32 whole-number multiplications in one instruction (maddubs).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_q4_0_q8_0_avx2(row: &[u8], x: &Q8Vector) -> f32 {
+    use std::arch::x86_64::*;
+    unsafe {
+        let low_4_bits = _mm_set1_epi8(0x0F);
+        let eight = _mm256_set1_epi8(8);
+        let ones = _mm256_set1_epi16(1);
+        let mut total = _mm256_setzero_ps();
+
+        for (b, block) in row.chunks_exact(18).enumerate() {
+            // 32 weights as whole numbers -8..7: low halves in the first 16 bytes, high halves in the last 16
+            let packed = _mm_loadu_si128(block.as_ptr().add(2) as *const __m128i);
+            let low = _mm_and_si128(packed, low_4_bits);
+            let high = _mm_and_si128(_mm_srli_epi16(packed, 4), low_4_bits);
+            let w = _mm256_sub_epi8(_mm256_set_m128i(high, low), eight);
+
+            // 32 word values (-127..127)
+            let xv = _mm256_loadu_si256(x.values.as_ptr().add(b * 32) as *const __m256i);
+
+            // maddubs needs one side without a sign: use |w|, and move w's sign onto x
+            let w_abs = _mm256_sign_epi8(w, w);
+            let x_signed = _mm256_sign_epi8(xv, w);
+            let pairs = _mm256_maddubs_epi16(w_abs, x_signed); // 32 products → 16 sums of 2
+            let quads = _mm256_madd_epi16(pairs, ones); //          16 sums → 8 sums of 4 (i32)
+
+            // × both scales, once per block, into the 8 running totals
+            let scale = _mm256_set1_ps(f16_to_f32(u16::from_le_bytes([block[0], block[1]])) * x.scales[b]);
+            total = _mm256_fmadd_ps(_mm256_cvtepi32_ps(quads), scale, total);
+        }
+
+        // Add the 8 lanes together into one number
+        let half = _mm_add_ps(_mm256_castps256_ps128(total), _mm256_extractf128_ps(total, 1));
+        let quarter = _mm_add_ps(half, _mm_movehl_ps(half, half));
+        let one = _mm_add_ss(quarter, _mm_shuffle_ps(quarter, quarter, 1));
+        _mm_cvtss_f32(one)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,9 +482,42 @@ mod tests {
         let x: Vec<f32> = (0..cols).map(|i| (i as f32 - 32.0) / 10.0).collect();
         let simple = m.matvec_simple(&x);
         let fast = m.matvec(&x);
+        // The fast version rounds x to 8 bits (integer maths), so allow a tiny difference
+        let biggest = simple.iter().fold(0f32, |m, v| m.max(v.abs()));
         for (a, b) in simple.iter().zip(&fast) {
-            assert!((a - b).abs() < 1e-3, "{a} vs {b}");
+            assert!((a - b).abs() < 0.01 * biggest, "{a} vs {b}");
         }
+    }
+
+    #[test]
+    fn q8_0_rounding_is_close() {
+        let x: Vec<f32> = (0..64).map(|i| (i as f32 * 0.37).sin() * 3.0).collect();
+        let q = quantize_q8_0(&x);
+        assert_eq!(q.scales.len(), 2);
+        for (i, v) in x.iter().enumerate() {
+            let back = q.values[i] as f32 * q.scales[i / 32];
+            assert!((back - v).abs() <= q.scales[i / 32] * 0.5 + 1e-6, "{v} came back as {back}");
+        }
+        assert_eq!(quantize_q8_0(&[0.0; 32]).values, vec![0i8; 32]); // all zeros stay zeros
+    }
+
+    #[test]
+    fn integer_dot_matches_decimal_dot() {
+        // 4 blocks with every possible 4-bit value and varied scales
+        let mut row = Vec::new();
+        for b in 0..4u16 {
+            row.extend_from_slice(&(0x3000u16 + b * 0x0400).to_le_bytes());
+            for j in 0..16u8 {
+                row.push(j.wrapping_mul(17).wrapping_add(b as u8 * 3));
+            }
+        }
+        let x: Vec<f32> = (0..128).map(|i| ((i * 37) % 19) as f32 / 7.0 - 1.3).collect();
+        let q8 = quantize_q8_0(&x);
+        let decimal = dot_q4_0_scalar(&row, &x);
+        let plain = dot_q4_0_q8_0_scalar(&row, &q8);
+        let fast = dot_q4_0_q8_0(&row, &q8);
+        assert!((plain - fast).abs() < 1e-3, "plain {plain} vs avx2 {fast}"); // same integer maths
+        assert!((plain - decimal).abs() < 0.02 * decimal.abs().max(1.0), "{plain} vs decimal {decimal}"); // tiny rounding
     }
 
     #[test]
