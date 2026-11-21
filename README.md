@@ -1,3 +1,5 @@
+[![CI](https://github.com/GAURI-cpu/RustLLM/actions/workflows/ci.yml/badge.svg)](https://github.com/GAURI-cpu/RustLLM/actions/workflows/ci.yml)
+
 <p align="center">
   <img src="kinsin-logo/kinsin-icon.svg" width="96" alt="kinSin logo">
 </p>
