@@ -1560,6 +1560,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kinsin-engine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rayon",
+ "tokenizers",
+]
+
+[[package]]
 name = "lebe"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2626,6 +2635,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hound",
  "image",
+ "kinsin-engine",
  "ocrs",
  "reqwest",
  "rten",

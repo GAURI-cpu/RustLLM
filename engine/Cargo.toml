@@ -1,0 +1,10 @@
+[package]
+name = "kinsin-engine"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+rayon = "1"
+[dev-dependencies]
+tokenizers = "0.23"
