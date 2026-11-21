@@ -1,5 +1,3 @@
-[![CI](https://github.com/GAURI-cpu/RustLLM/actions/workflows/ci.yml/badge.svg)](https://github.com/GAURI-cpu/RustLLM/actions/workflows/ci.yml)
-
 <p align="center">
   <img src="kinsin-logo/kinsin-icon.svg" width="96" alt="kinSin logo">
 </p>
@@ -12,6 +10,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/GAURI-cpu/RustLLM/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/GAURI-cpu/RustLLM/ci.yml?branch=main&label=CI" alt="CI status"></a>
   <img src="https://img.shields.io/badge/rust-2024-orange" alt="Rust 2024">
   <img src="https://img.shields.io/badge/GPU-not%20needed-8a1c3b" alt="No GPU needed">
   <img src="https://img.shields.io/badge/engine-from%20scratch-8a1c3b" alt="Engine written from scratch">
