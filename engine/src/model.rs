@@ -1,11 +1,13 @@
 //! The Qwen2 transformer, put together from the building blocks in ops.rs.
 
+use std::time::{Duration, Instant};
+
 use anyhow::Context;
 
 use crate::gguf::Gguf;
 use crate::ops::{rms_norm, rope, softmax, swiglu};
 use crate::quant::QMatrix;
-use std::time::{Duration, Instant};
+
 /// The model's shape, read from the GGUF file.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -21,9 +23,7 @@ pub struct Config {
 impl Config {
     pub fn from_gguf(g: &Gguf) -> anyhow::Result<Config> {
         let arch = g.get_str("general.architecture").unwrap_or("qwen2").to_string();
-        let int = |k: &str| {
-            g.get_u32(&format!("{arch}.{k}")).map(|v| v as usize).with_context(|| format!("missing {arch}.{k}"))
-        };
+        let int = |k: &str| g.get_u32(&format!("{arch}.{k}")).map(|v| v as usize).with_context(|| format!("missing {arch}.{k}"));
         let hidden = int("embedding_length")?;
         let heads = int("attention.head_count")?;
         Ok(Config {
@@ -57,7 +57,7 @@ pub struct Layer {
 /// What one layer remembers about earlier words: their keys and values.
 #[derive(Default)]
 pub struct LayerCache {
-    keys: Vec<f32>, // position after position, each kv_heads × head_dim numbers
+    keys: Vec<f32>,   // position after position, each kv_heads × head_dim numbers
     values: Vec<f32>,
 }
 
@@ -154,6 +154,79 @@ impl Layer {
     }
 }
 
+impl Layer {
+    /// Run SEVERAL words (a prompt) through this layer at once. Word t sits at position
+    /// start + t. Each weight matrix is read once for all the words (matmul).
+    pub fn forward_batch(&self, xs: &mut [Vec<f32>], start: usize, cfg: &Config, cache: &mut LayerCache) {
+        use rayon::prelude::*;
+        let hd = cfg.head_dim;
+        let kv_dim = cfg.kv_heads * hd;
+        let n = xs.len();
+
+        // ----- Attention -----
+        let hs: Vec<Vec<f32>> = xs.iter().map(|x| rms_norm(x, &self.attn_norm, cfg.eps)).collect();
+        let mut qs = self.wq.matmul(&hs);
+        let mut ks = self.wk.matmul(&hs);
+        let vs = self.wv.matmul(&hs);
+        for t in 0..n {
+            add(&mut qs[t], &self.bq);
+            add(&mut ks[t], &self.bk);
+            for head in qs[t].chunks_exact_mut(hd) {
+                rope(head, start + t, cfg.rope_base);
+            }
+            for head in ks[t].chunks_exact_mut(hd) {
+                rope(head, start + t, cfg.rope_base);
+            }
+            cache.keys.extend_from_slice(&ks[t]);
+            let mut v = vs[t].clone();
+            add(&mut v, &self.bv);
+            cache.values.extend_from_slice(&v);
+        }
+
+        // Each word looks only at itself and the words BEFORE it (the causal rule)
+        let group = cfg.heads / cfg.kv_heads;
+        let cache = &*cache;
+        let outs: Vec<Vec<f32>> = (0..n)
+            .into_par_iter()
+            .map(|t| {
+                let seen = start + t + 1; // words this one may look at
+                let q = &qs[t];
+                let mut out = vec![0.0; cfg.heads * hd];
+                for head in 0..cfg.heads {
+                    let kv = head / group;
+                    let q_head = &q[head * hd..(head + 1) * hd];
+                    let mut scores: Vec<f32> = (0..seen)
+                        .map(|p| dot(q_head, &cache.keys[p * kv_dim + kv * hd..][..hd]) / (hd as f32).sqrt())
+                        .collect();
+                    softmax(&mut scores);
+                    let out_head = &mut out[head * hd..(head + 1) * hd];
+                    for (p, &w) in scores.iter().enumerate() {
+                        let value = &cache.values[p * kv_dim + kv * hd..][..hd];
+                        for (o, val) in out_head.iter_mut().zip(value) {
+                            *o += w * val;
+                        }
+                    }
+                }
+                out
+            })
+            .collect();
+        for (x, o) in xs.iter_mut().zip(self.wo.matmul(&outs)) {
+            add(x, &o);
+        }
+
+        // ----- Feed-forward -----
+        let hs: Vec<Vec<f32>> = xs.iter().map(|x| rms_norm(x, &self.ffn_norm, cfg.eps)).collect();
+        let mut gates = self.gate.matmul(&hs);
+        let ups = self.up.matmul(&hs);
+        for (g, u) in gates.iter_mut().zip(&ups) {
+            swiglu(g, u);
+        }
+        for (x, d) in xs.iter_mut().zip(self.down.matmul(&gates)) {
+            add(x, &d);
+        }
+    }
+}
+
 /// The whole model.
 pub struct Model {
     pub cfg: Config,
@@ -196,8 +269,33 @@ impl Model {
         }
     }
 
+    /// Feed a whole prompt at once (positions start, start+1, ...). Much faster than
+    /// one word at a time. Returns the scores for the word AFTER the last prompt word.
+    pub fn forward_prompt(&mut self, tokens: &[u32], start: usize) -> Vec<f32> {
+        let mut xs: Vec<Vec<f32>> = tokens
+            .iter()
+            .map(|&t| {
+                let mut x = Vec::with_capacity(self.cfg.hidden);
+                self.embed.row(t as usize, &mut x);
+                x
+            })
+            .collect();
+
+        let started = Instant::now();
+        for (layer, cache) in self.layers.iter().zip(&mut self.cache) {
+            layer.forward_batch(&mut xs, start, &self.cfg, cache);
+        }
+        self.time_layers += started.elapsed();
+
+        // Only the LAST word's next-word scores are needed
+        let started = Instant::now();
+        let last = rms_norm(xs.last().expect("empty prompt"), &self.norm, self.cfg.eps);
+        let scores = self.output.matvec(&last);
+        self.time_output += started.elapsed();
+        scores
+    }
+
     /// Feed one token at position `pos`; returns a score for every word in the vocabulary.
-        /// Feed one token at position `pos`; returns a score for every word in the vocabulary.
     pub fn forward(&mut self, token: u32, pos: usize) -> Vec<f32> {
         let mut x = Vec::with_capacity(self.cfg.hidden);
         self.embed.row(token as usize, &mut x); // word number -> 1536 numbers
@@ -213,5 +311,38 @@ impl Model {
         let scores = self.output.matvec(&x); // 1536 numbers -> 151936 word scores
         self.time_output += started.elapsed();
         scores
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Reading a prompt in one batch must give the same scores as reading it word by word.
+    /// Uses the real model, so it's slow: run it with
+    ///   cargo test --release -p kinsin-engine -- --ignored
+    #[test]
+    #[ignore]
+    fn batched_prompt_matches_word_by_word() {
+        let path = "../models/kinsin-1.5b-v2-q4_0.gguf"; // tests run inside engine/
+        if !std::path::Path::new(path).exists() {
+            eprintln!("skipped: {path} not found");
+            return;
+        }
+        let prompt = [3u32, 17, 5, 22, 9, 30, 1];
+        let mut one_by_one = Model::load(path).unwrap();
+        let mut expected = Vec::new();
+        for (pos, &t) in prompt.iter().enumerate() {
+            expected = one_by_one.forward(t, pos);
+        }
+        let mut batched = Model::load(path).unwrap();
+        let got = batched.forward_prompt(&prompt, 0);
+        let diff = got.iter().zip(&expected).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        assert!(diff < 1e-3, "max difference {diff}");
+        // And the conversation continues identically afterwards
+        let a = one_by_one.forward(11, prompt.len());
+        let b = batched.forward(11, prompt.len());
+        let diff = a.iter().zip(&b).map(|(x, y)| (x - y).abs()).fold(0f32, f32::max);
+        assert!(diff < 1e-3, "after the prompt: max difference {diff}");
     }
 }

@@ -29,10 +29,7 @@ fn median(mut v: Vec<f64>) -> f64 {
 fn run_mine(model: &mut Model, prompt: &[u32]) -> (f64, f64) {
     model.reset();
     let t = Instant::now();
-    let mut scores = Vec::new();
-    for (pos, &tok) in prompt.iter().enumerate() {
-        scores = model.forward(tok, pos);
-    }
+    let mut scores = model.forward_prompt(prompt, 0); // the whole prompt in one batch
     let read = t.elapsed().as_secs_f64();
     let t = Instant::now();
     let mut pos = prompt.len();

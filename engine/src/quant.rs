@@ -109,6 +109,31 @@ impl QMatrix {
         }
     }
 
+    /// Many vectors at once: ys[t] = W · xs[t] for every t.
+    /// Each weight row is read from RAM ONCE and used for all the vectors while it's
+    /// still in the CPU cache. This is what makes reading a prompt fast.
+    pub fn matmul(&self, xs: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        use rayon::prelude::*;
+        let n = xs.len();
+        for x in xs {
+            assert_eq!(x.len(), self.cols, "vector size doesn't match the matrix");
+        }
+        const ROWS_PER_JOB: usize = 16;
+        // Results stored row by row: flat[r * n + t] = row r · xs[t]
+        let mut flat = vec![0.0; self.rows * n];
+        flat.par_chunks_mut(ROWS_PER_JOB * n).enumerate().for_each(|(job, part)| {
+            let mut buf = Vec::new();
+            for (j, out_row) in part.chunks_mut(n).enumerate() {
+                let r = job * ROWS_PER_JOB + j;
+                for (t, out) in out_row.iter_mut().enumerate() {
+                    *out = self.row_dot(r, &xs[t], &mut buf); // same row bytes, still in cache
+                }
+            }
+        });
+        // Turn "row by row" into "one result list per vector"
+        (0..n).map(|t| (0..self.rows).map(|r| flat[r * n + t]).collect()).collect()
+    }
+
     /// The old, simple version (kept to compare speed and results).
     pub fn matvec_simple(&self, x: &[f32]) -> Vec<f32> {
         let mut row = Vec::with_capacity(self.cols);

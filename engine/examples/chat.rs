@@ -46,11 +46,8 @@ fn main() -> anyhow::Result<()> {
         let ids = tokenizer.encode(next_input.as_str(), false).map_err(anyhow::Error::msg)?.get_ids().to_vec();
         next_input.clear();
         let reading = Instant::now();
-        let mut scores = Vec::new();
-        for &id in &ids {
-            scores = model.forward(id, pos);
-            pos += 1;
-        }
+        let mut scores = model.forward_prompt(&ids, pos); // the whole message in one batch
+        pos += ids.len();
         let read_time = reading.elapsed().as_secs_f32();
 
         // 2. Write the answer: pick the best word, feed it back, repeat
@@ -85,11 +82,6 @@ fn main() -> anyhow::Result<()> {
             ids.len(),
             reply.len(),
             reply.len() as f32 / write_time
-        );
-        println!(
-            "  [time so far: 28 layers {:.1}s · output layer {:.1}s]",
-            model.time_layers.as_secs_f32(),
-            model.time_output.as_secs_f32()
         );
     }
     Ok(())
