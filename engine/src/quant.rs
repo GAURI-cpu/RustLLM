@@ -131,21 +131,17 @@ impl QMatrix {
     }
 
     /// y = W · x, with the rows shared out between all CPU cores.
+    /// rayon keeps one thread per core alive and hands them work, instead of
+    /// starting new threads for every multiplication.
     pub fn matvec(&self, x: &[f32]) -> Vec<f32> {
+        use rayon::prelude::*;
         assert_eq!(x.len(), self.cols, "vector size doesn't match the matrix");
+        const ROWS_PER_JOB: usize = 16; // small jobs, so even 256-row matrices keep 16 cores busy
         let mut y = vec![0.0; self.rows];
-        let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-        let per_core = self.rows.div_ceil(cores);
-        std::thread::scope(|s| {
-            // Each core gets its own slice of y to fill: no two cores ever write the same place
-            for (i, part) in y.chunks_mut(per_core).enumerate() {
-                s.spawn(move || {
-                    let first_row = i * per_core;
-                    let mut buf = Vec::with_capacity(self.cols);
-                    for (j, out) in part.iter_mut().enumerate() {
-                        *out = self.row_dot(first_row + j, x, &mut buf);
-                    }
-                });
+        y.par_chunks_mut(ROWS_PER_JOB).enumerate().for_each(|(job, part)| {
+            let mut buf = Vec::new(); // only used by non-Q4_0 rows
+            for (j, out) in part.iter_mut().enumerate() {
+                *out = self.row_dot(job * ROWS_PER_JOB + j, x, &mut buf);
             }
         });
         y

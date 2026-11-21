@@ -86,6 +86,11 @@ fn main() -> anyhow::Result<()> {
             reply.len(),
             reply.len() as f32 / write_time
         );
+        println!(
+            "  [time so far: 28 layers {:.1}s · output layer {:.1}s]",
+            model.time_layers.as_secs_f32(),
+            model.time_output.as_secs_f32()
+        );
     }
     Ok(())
 }

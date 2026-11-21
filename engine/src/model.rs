@@ -5,7 +5,7 @@ use anyhow::Context;
 use crate::gguf::Gguf;
 use crate::ops::{rms_norm, rope, softmax, swiglu};
 use crate::quant::QMatrix;
-
+use std::time::{Duration, Instant};
 /// The model's shape, read from the GGUF file.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -162,6 +162,8 @@ pub struct Model {
     norm: Vec<f32>,
     output: QMatrix, // output.weight, or token_embd again (tied embeddings)
     cache: Vec<LayerCache>,
+    pub time_layers: Duration, // total time spent in the 28 layers
+    pub time_output: Duration, // total time spent turning numbers into word scores
 }
 
 impl Model {
@@ -182,6 +184,8 @@ impl Model {
             embed,
             layers,
             output,
+            time_layers: Duration::ZERO,
+            time_output: Duration::ZERO,
         })
     }
 
@@ -193,13 +197,21 @@ impl Model {
     }
 
     /// Feed one token at position `pos`; returns a score for every word in the vocabulary.
+        /// Feed one token at position `pos`; returns a score for every word in the vocabulary.
     pub fn forward(&mut self, token: u32, pos: usize) -> Vec<f32> {
         let mut x = Vec::with_capacity(self.cfg.hidden);
         self.embed.row(token as usize, &mut x); // word number -> 1536 numbers
+
+        let started = Instant::now();
         for (layer, cache) in self.layers.iter().zip(&mut self.cache) {
             layer.forward(&mut x, pos, &self.cfg, cache);
         }
+        self.time_layers += started.elapsed();
+
+        let started = Instant::now();
         let x = rms_norm(&x, &self.norm, self.cfg.eps);
-        self.output.matvec(&x) // 1536 numbers -> 151936 word scores
+        let scores = self.output.matvec(&x); // 1536 numbers -> 151936 word scores
+        self.time_output += started.elapsed();
+        scores
     }
 }
