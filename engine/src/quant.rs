@@ -122,9 +122,12 @@ impl QMatrix {
 
     /// One row · x. Q4_0 rows are multiplied straight from their packed bytes.
     fn row_dot(&self, r: usize, x: &[f32], buf: &mut Vec<f32>) -> f32 {
-        if self.kind == 2 {
-            let size = row_bytes(2, self.cols).unwrap();
-            return dot_q4_0(&self.bytes[r * size..(r + 1) * size], x);
+        let size = row_bytes(self.kind, self.cols).unwrap();
+        let row = &self.bytes[r * size..(r + 1) * size];
+        match self.kind {
+            2 => return dot_q4_0(row, x),
+            14 => return dot_q6_k(row, x),
+            _ => {}
         }
         self.row(r, buf);
         buf.iter().zip(x).map(|(w, v)| w * v).sum()
@@ -218,6 +221,81 @@ unsafe fn dot_q4_0_avx2(row: &[u8], x: &[f32]) -> f32 {
     }
 }
 
+/// Unpack one Q6_K block's 256 six-bit values into small whole numbers (-32..31).
+/// Same bit layout as dequantize_q6_k, but no scales and no decimals yet.
+fn q6_k_values(block: &[u8], q: &mut [i8; 256]) {
+    for half in 0..2 {
+        let ql = &block[half * 64..half * 64 + 64];
+        let qh = &block[128 + half * 32..128 + half * 32 + 32];
+        let q = &mut q[half * 128..half * 128 + 128];
+        for l in 0..32 {
+            q[l] = ((ql[l] & 0x0F) | ((qh[l] & 3) << 4)) as i8 - 32;
+            q[l + 32] = ((ql[l + 32] & 0x0F) | (((qh[l] >> 2) & 3) << 4)) as i8 - 32;
+            q[l + 64] = ((ql[l] >> 4) | (((qh[l] >> 4) & 3) << 4)) as i8 - 32;
+            q[l + 96] = ((ql[l + 32] >> 4) | (((qh[l] >> 6) & 3) << 4)) as i8 - 32;
+        }
+    }
+}
+
+/// One Q6_K row · x, straight from the packed bytes.
+/// Every 16 numbers share one small scale (scales[n / 16]), and the block shares d.
+pub fn dot_q6_k(row: &[u8], x: &[f32]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            return unsafe { dot_q6_k_avx2(row, x) };
+        }
+    }
+    dot_q6_k_scalar(row, x)
+}
+
+pub fn dot_q6_k_scalar(row: &[u8], x: &[f32]) -> f32 {
+    let mut q = [0i8; 256];
+    let mut total = 0.0;
+    for (block, xs) in row.chunks_exact(210).zip(x.chunks_exact(256)) {
+        let d = f16_to_f32(u16::from_le_bytes([block[208], block[209]]));
+        q6_k_values(block, &mut q);
+        for group in 0..16 {
+            let scale = block[192 + group] as i8 as f32;
+            let mut sum = 0.0;
+            for i in group * 16..group * 16 + 16 {
+                sum += q[i] as f32 * xs[i];
+            }
+            total += d * scale * sum;
+        }
+    }
+    total
+}
+
+/// AVX2 version: 16 numbers per group = 2 × 8 lanes, scale applied once per group.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_q6_k_avx2(row: &[u8], x: &[f32]) -> f32 {
+    use std::arch::x86_64::*;
+    unsafe {
+        let mut q = [0i8; 256];
+        let mut total = _mm256_setzero_ps();
+        for (block, xs) in row.chunks_exact(210).zip(x.chunks_exact(256)) {
+            let d = f16_to_f32(u16::from_le_bytes([block[208], block[209]]));
+            q6_k_values(block, &mut q);
+            for group in 0..16 {
+                let values = _mm_loadu_si128(q.as_ptr().add(group * 16) as *const __m128i); // 16 small numbers
+                let x = xs.as_ptr().add(group * 16);
+                let first = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(values)); // numbers 0..8
+                let second = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(_mm_srli_si128(values, 8))); // 8..16
+                let mut sum = _mm256_mul_ps(first, _mm256_loadu_ps(x));
+                sum = _mm256_fmadd_ps(second, _mm256_loadu_ps(x.add(8)), sum);
+                let scale = _mm256_set1_ps(d * block[192 + group] as i8 as f32);
+                total = _mm256_fmadd_ps(sum, scale, total);
+            }
+        }
+        let half = _mm_add_ps(_mm256_castps256_ps128(total), _mm256_extractf128_ps(total, 1));
+        let quarter = _mm_add_ps(half, _mm_movehl_ps(half, half));
+        let one = _mm_add_ss(quarter, _mm_shuffle_ps(quarter, quarter, 1));
+        _mm_cvtss_f32(one)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,5 +378,26 @@ mod tests {
         let plain = dot_q4_0_scalar(&row, &x);
         let fast = dot_q4_0(&row, &x);
         assert!((plain - fast).abs() < 1e-3, "{plain} vs {fast}");
+    }
+
+    #[test]
+    fn q6_k_dot_matches_unpack_then_dot() {
+        // 2 blocks of pseudo-random bytes with a small d, against the plain unpack + dot
+        let mut row = Vec::new();
+        let mut seed = 7u32;
+        for _ in 0..2 {
+            for _ in 0..208 {
+                seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                row.push((seed >> 16) as u8);
+            }
+            row.extend_from_slice(&0x2400u16.to_le_bytes()); // d = 2^-6
+        }
+        let x: Vec<f32> = (0..512).map(|i| ((i * 37) % 23) as f32 / 9.0 - 1.1).collect();
+        let mut unpacked = Vec::new();
+        dequantize_q6_k(&row, &mut unpacked);
+        let expected: f32 = unpacked.iter().zip(&x).map(|(a, b)| a * b).sum();
+        for got in [dot_q6_k_scalar(&row, &x), dot_q6_k(&row, &x)] {
+            assert!((got - expected).abs() < 1e-2 * expected.abs().max(1.0), "{got} vs {expected}");
+        }
     }
 }
