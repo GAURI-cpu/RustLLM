@@ -9,6 +9,7 @@
 //!   cargo run --release -- --serve --guest-limit 20 --user-limit 100   messages an hour (fair use)
 //!   cargo run --release -- --serve --trust-proxy   behind Cloudflare/nginx: read the client IP from its headers
 //!   cargo run --release -- --serve --no-live   never look anything up on Wikipedia
+//!   cargo run --release -- --serve --engine candle   use Candle instead of my own engine (default: own)
 //!   cargo run --release -- --export-training data/train.jsonl   write the 👍 / corrected answers of users
 //!                                                who turned on "Help improve kinSin" (JSONL), then exit
 //!   cargo run --release -- --model models/other-model.gguf
@@ -28,10 +29,10 @@ mod voice;
 use std::io::Write;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use chat::{Message, Role, build_prompt_within};
-use engine::Engine;
+use engine::{Engine, EngineKind};
 use ocr::Ocr;
 use sampler::SamplingOptions;
 use voice::Voice;
@@ -52,6 +53,7 @@ fn main() -> Result<()> {
     let mut export_training: Option<String> = None;
     let mut port: u16 = 8080;
     let mut context: usize = 4096;
+    let mut engine_kind = EngineKind::Own;
 
     let args: Vec<String> = std::env::args().collect();
     let mut i = 1;
@@ -63,6 +65,11 @@ fn main() -> Result<()> {
             }
             "--tokenizer" if i + 1 < args.len() => {
                 tokenizer_path = args[i + 1].clone();
+                i += 1;
+            }
+            "--engine" if i + 1 < args.len() => {
+                engine_kind = EngineKind::parse(&args[i + 1])
+                    .with_context(|| format!("--engine must be 'own' or 'candle', not '{}'", args[i + 1]))?;
                 i += 1;
             }
             "--serve" => serve = true,
@@ -118,7 +125,11 @@ fn main() -> Result<()> {
 
     println!("AVX enabled: {}", candle_core::utils::with_avx());
     println!("Loading {} ...", model_path);
-    let mut engine = Engine::load(&model_path, &tokenizer_path, context)?;
+    let mut engine = Engine::load(&model_path, &tokenizer_path, context, engine_kind)?;
+    match engine.kind() {
+        EngineKind::Own => println!("Engine: kinsin-engine (my own, written from scratch)"),
+        EngineKind::Candle => println!("Engine: Candle"),
+    }
 
     if serve {
         // Start the async runtime and run the server until Ctrl+C
