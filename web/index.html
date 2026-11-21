@@ -121,17 +121,15 @@
   }
   .sources a:hover, .sources a:focus-visible { color: var(--accent); border-color: var(--accent); }
   .msg .remembered { margin-top: 8px; font: 12px/1.5 var(--mono); color: var(--muted); overflow-wrap: anywhere; }
-  /* 👍 / 👎: grey until chosen */
+  /* ✅ keep / ❌ don't keep / ✏️ edit under each answer: grey until chosen */
   .act.rate {
-    background: none; border: 0; padding: 0 2px; cursor: pointer; font: 13px/1 var(--sans);
-    filter: grayscale(1); opacity: 0.45;
+    background: none; border: 0; padding: 0 3px; cursor: pointer; font: 12px/1.4 var(--mono); color: var(--muted);
+    filter: grayscale(1); opacity: 0.55;
   }
-  .act.rate:hover, .act.rate:focus-visible { opacity: 0.85; }
-  .act.rate.on { filter: none; opacity: 1; }
+  .act.rate:hover, .act.rate:focus-visible { opacity: 0.9; color: var(--accent); }
+  .act.rate.on { filter: none; opacity: 1; color: var(--accent); font-weight: 600; }
   .meta .rate-note { color: var(--accent); }
   .meta .rate-note:empty { display: none; }
-  .fix-box { margin-top: 10px; }
-  .fix-box label { font: 12px var(--mono); color: var(--muted); }
   .msg.error .body { color: #b3261e; }
   .meta .copy-reply { background: none; border: 0; color: var(--muted); font: inherit; cursor: pointer; padding: 0; text-decoration: underline; }
   /* stats + copy / listen / regenerate: wraps neatly on narrow screens */
@@ -266,7 +264,7 @@
   @media (hover: none) { .msg.user .msg-actions { visibility: visible; } }
   .app.busy .edit-msg, .app.busy .regen-btn, .app.busy .retry-btn { display: none; }
   .msg.pending .body { color: var(--muted); }
-  .msg.editing > .body, .msg.editing > .msg-actions { display: none; }
+  .msg.editing > .body, .msg.editing > .msg-actions, .msg.editing > .meta { display: none; }
 
   /* Photos: button, preview chip, drag-and-drop, and photos in messages */
   .photo-btn {
@@ -541,12 +539,12 @@
   <main id="scroller">
     <div class="thread" id="thread">
       <div class="empty" id="empty">
-        <h1>An LLM, running on a CPU.</h1>
-        <p>Written in Rust. No GPU, no cloud API: every word below is computed by this server, token by token.</p>
+        <h1>Ask kinSin.</h1>
+        <p>A small AI with a brain built from scratch, thinking on this CPU one token at a time.</p>
         <div class="chips">
-          <button class="chip">What is Rust? Answer in two sentences.</button>
-          <button class="chip">Explain recursion with a simple example.</button>
-          <button class="chip">Write a haiku about a slow compiler.</button>
+          <button class="chip">Teach me something cool in 2 minutes</button>
+          <button class="chip">Help me plan my week</button>
+          <button class="chip">How do you think without a GPU?</button>
         </div>
       </div>
     </div>
@@ -562,7 +560,7 @@
       <button class="photo-btn mic-btn" id="mic-btn" type="button" aria-label="Speak instead of typing" aria-pressed="false" title="Speak" hidden>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v1a7 7 0 0 0 14 0v-1M12 18v4M8 22h8"/></svg>
       </button>
-      <textarea id="input" rows="1" placeholder="Ask anything…" autofocus></textarea>
+      <textarea id="input" rows="1" placeholder="Ask kinSin…" autofocus></textarea>
       <button class="send" id="send" type="submit">Send</button>
     </form>
     <div class="hint">
@@ -667,7 +665,7 @@
           <input type="checkbox" id="improve-box">
           <span>
             <b>Help improve kinSin</b>
-            <small>Rate answers with 👍 / 👎 and suggest better ones. Liked and corrected answers may be used to train kinSin. Answers that used live Wikipedia data never are.</small>
+            <small>Your finished answers are saved. Under each answer, choose ✅ keep, ❌ don't keep or ✏️ edit it into the answer kinSin should have given. Only kept and edited answers may be used to train kinSin; answers that used live Wikipedia data never are. Turning this off deletes everything saved.</small>
           </span>
         </label>
         <div class="memory-head">WHAT KINSIN REMEMBERS ABOUT YOU</div>
@@ -845,11 +843,11 @@ function renderThread() {
     if (m.role === 'user') { addUserMessage(m, i); return; }
     const el = addMessage('assistant', '');
     el.dataset.index = i;
-    el.querySelector('.body').innerHTML = renderMarkdown(m.content);
+    el.querySelector('.body').innerHTML = renderMarkdown(shownAnswer(m));
     if (m.sources) showSources(el, m.sources);
     if (m.memorySaved) showRemembered(el, m.memorySaved);
     if (m.meta) meta(el, m.meta);
-    addReplyCopy(el, m.content);
+    addReplyCopy(el, shownAnswer(m));
   });
   // The last question never got an answer (e.g. the server failed earlier): offer a retry
   if (chat.messages.at(-1)?.role === 'user' && !controller) {
@@ -894,7 +892,7 @@ async function send(text, photo = null) {
 async function generate(chat, { fromSend = false } = {}) {
   if (controller) return;                       // never two replies at once
   if (chat === current) thread.querySelectorAll('.msg.pending, .msg.error').forEach(m => m.remove());
-  const messages = chat.messages.map(({ role, content }) => ({ role, content }));   // never send meta
+  const messages = historyUpTo(chat, chat.messages.length);   // never send meta; your edits count as what kinSin said
 
   const bot = addMessage('assistant', '');
   bot.dataset.index = chat.messages.length;
@@ -1006,6 +1004,8 @@ async function generate(chat, { fromSend = false } = {}) {
       if (memorySaved.length) saved.memorySaved = memorySaved;
       chat.messages.push(saved);
       chat.updated = Date.now();
+      // "Help improve kinSin": save finished answers (not stopped or failed ones) as undecided
+      if (!aborted && !failure && currentUser?.improve) saveForTraining(chat, chat.messages.length - 1);
       if (shown && !bot.isConnected) renderThread();   // switched away and back mid-reply
     } else if (aborted) {
       // Stopped before any text: drop the empty bubble, and the question too if it was just sent
@@ -1297,22 +1297,46 @@ function addReplyCopy(el, raw) {
   if (canSpeak && !m.querySelector('.listen-btn')) m.insertAdjacentHTML('beforeend', '<button type="button" class="listen-btn">listen</button>');
   if (currentUser && !m.querySelector('.rate')) {
     m.insertAdjacentHTML('beforeend',
-      '<button type="button" class="act rate" data-rate="up" aria-label="Good answer" title="Good answer" aria-pressed="false">👍</button>' +
-      '<button type="button" class="act rate" data-rate="down" aria-label="Bad answer" title="Bad answer" aria-pressed="false">👎</button>' +
+      '<button type="button" class="act rate" data-rate="keep" title="A good answer: kinSin may learn from it" aria-pressed="false">✅ keep</button>' +
+      '<button type="button" class="act rate" data-rate="drop" title="A bad answer: never learn from it" aria-pressed="false">❌ don\'t keep</button>' +
+      '<button type="button" class="act rate" data-rate="edit" title="Write the answer kinSin should have given" aria-pressed="false">✏️ edit</button>' +
       '<span class="rate-note" role="status"></span>');
   }
   showRating(el);
 }
 
-// Light up 👍 or 👎 to match the saved rating of the answer in `el`
+// What an answer shows: your edit if you made one, else what kinSin wrote
+function shownAnswer(m) { return m.corrected || m.content; }
+// The conversation before message `end`, as the server wants it. Earlier answers you
+// edited count as your version, so kinSin (and its training data) carry on from that.
+function historyUpTo(chat, end) {
+  return chat.messages.slice(0, end).map(m => ({ role: m.role, content: m.role === 'assistant' ? shownAnswer(m) : m.content }));
+}
+// The messages saved for training: the history, then kinSin's own answer (the edit goes separately)
+function trainingMessages(chat, index) {
+  return [...historyUpTo(chat, index), { role: 'assistant', content: chat.messages[index].content }];
+}
+
+// Light up ✅ / ❌ / ✏️ to match the saved choice for the answer in `el`
 function showRating(el) {
   const msg = current.messages[Number(el.dataset.index)];
-  const rating = msg?.role === 'assistant' ? msg.rating : 0;
+  const isAnswer = msg?.role === 'assistant';
+  const rating = isAnswer ? msg.rating : 0;
+  const edited = isAnswer && !!msg.corrected;
   el.querySelectorAll('.rate').forEach(b => {
-    const on = (b.dataset.rate === 'up' && rating === 1) || (b.dataset.rate === 'down' && rating === -1);
+    const on = (b.dataset.rate === 'keep' && rating === 1 && !edited) ||
+               (b.dataset.rate === 'drop' && rating === -1) ||
+               (b.dataset.rate === 'edit' && edited);
     b.classList.toggle('on', on);
     b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    if (b.dataset.rate === 'edit') b.textContent = edited ? '✏️ edited' : '✏️ edit';
   });
+}
+// Redraw the answer text (after an edit is saved or removed)
+function showAnswer(el, msg) {
+  const body = el.querySelector('.body');
+  if (body) body.innerHTML = renderMarkdown(shownAnswer(msg));
+  el.rawReply = shownAnswer(msg);
 }
 
 // "🧠 Remembered: …" under an answer
@@ -1327,8 +1351,9 @@ function showRemembered(el, facts) {
   if (metaEl) metaEl.before(row); else el.appendChild(row);
 }
 
-// --- 👍 / 👎 (logged-in users who turned on "Help improve kinSin") ---
-// Sends the rating with the conversation up to that answer. Returns true if it was saved.
+// --- ✅ keep / ❌ don't keep / ✏️ edit (logged-in users who turned on "Help improve kinSin") ---
+// rating: 1 = keep, -1 = don't keep, 0 = undecided. corrected = your edited answer (with keep).
+// Sends it with the conversation up to that answer. Returns true if it was saved.
 async function sendRating(chat, index, el, rating, corrected) {
   const msg = chat.messages[index];
   if (!msg || msg.role !== 'assistant') return false;
@@ -1340,12 +1365,14 @@ async function sendRating(chat, index, el, rating, corrected) {
       rating,
       corrected: corrected || null,
       live: !!msg.sources?.length,
-      messages: chat.messages.slice(0, index + 1).map(({ role, content }) => ({ role, content })),
+      messages: trainingMessages(chat, index),
     });
     if (rating) msg.rating = rating; else delete msg.rating;
+    const editChanged = (msg.corrected || null) !== (corrected || null);
     if (corrected) msg.corrected = corrected; else delete msg.corrected;
     saveChats();
     if (note) note.textContent = '';
+    if (editChanged && el.isConnected) showAnswer(el, msg);
     showRating(el);
     return true;
   } catch (err) {
@@ -1355,40 +1382,44 @@ async function sendRating(chat, index, el, rating, corrected) {
   }
 }
 
-// After 👎: an optional box for the answer kinSin should have given
-function openBetterAnswer(el, chat, index) {
-  el.querySelector('.fix-box')?.remove();
+// ✏️ edit: kinSin's answer turns into a text box right where it is
+function editAnswer(el, chat, index) {
+  if (el.classList.contains('editing')) return;
+  const msg = chat.messages[index];
+  el.classList.add('editing');                  // CSS hides the answer and the line under it
   const box = document.createElement('div');
-  box.className = 'fix-box edit-box';
-  const label = document.createElement('label');
-  label.textContent = 'What should kinSin have said? (optional, this teaches it the most)';
-  const text = document.createElement('textarea');
-  text.className = 'edit-input';
-  text.maxLength = 8000;
-  text.value = chat.messages[index]?.corrected || '';
-  label.htmlFor = text.id = 'better-' + chat.id + '-' + index;
-  const buttons = document.createElement('div');
-  buttons.className = 'edit-buttons';
-  const skip = document.createElement('button');
-  skip.type = 'button';
-  skip.textContent = 'Skip';
-  const save = document.createElement('button');
-  save.type = 'button';
-  save.className = 'edit-save';
-  save.textContent = 'Save better answer';
-  buttons.append(skip, save);
-  box.append(label, text, buttons);
+  box.className = 'edit-box';
+  box.innerHTML =
+    '<textarea class="edit-input" maxlength="8000" aria-label="The answer kinSin should have given"></textarea>' +
+    '<div class="edit-buttons">' +
+    '<button type="button" class="edit-cancel">Cancel</button>' +
+    '<button type="button" class="edit-save">Save answer</button>' +
+    '</div>';
+  const ta = box.querySelector('textarea');
+  ta.value = shownAnswer(msg);
   el.appendChild(box);
-  text.focus();
+  const fit = () => { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight + 2, 320) + 'px'; };
+  fit();
+  ta.addEventListener('input', fit);
+  ta.focus();
+  ta.setSelectionRange(ta.value.length, ta.value.length);
 
-  skip.addEventListener('click', () => box.remove());
-  text.addEventListener('keydown', e => { if (e.key === 'Escape') { e.preventDefault(); box.remove(); } });
-  save.addEventListener('click', async () => {
-    const better = text.value.trim();
-    if (!better) { box.remove(); return; }
-    save.disabled = true;
-    if (await sendRating(chat, index, el, -1, better)) box.remove();
-    else save.disabled = false;
+  const close = () => { box.remove(); el.classList.remove('editing'); };
+  const saveBtn = box.querySelector('.edit-save');
+  const save = async () => {
+    const text = ta.value.trim();
+    if (!text) { ta.focus(); return; }
+    // Back to kinSin's own words = just "keep"; anything else is your better answer
+    const corrected = text === msg.content.trim() ? null : text;
+    saveBtn.disabled = true;
+    if (await sendRating(chat, index, el, 1, corrected)) close();
+    else saveBtn.disabled = false;
+  };
+  box.querySelector('.edit-cancel').addEventListener('click', close);
+  saveBtn.addEventListener('click', save);
+  ta.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); }
+    else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); save(); }
   });
 }
 
@@ -1401,15 +1432,16 @@ thread.addEventListener('click', e => {
   const msg = chat.messages[index];
   if (!msg || msg.role !== 'assistant') return;
   if (!currentUser.improve) {
-    openMemory('To rate answers, first turn on “Help improve kinSin” below.');
+    openMemory('To keep or edit answers for training, first turn on “Help improve kinSin” below.');
     return;
   }
-  if (btn.dataset.rate === 'up') {
-    el.querySelector('.fix-box')?.remove();
-    sendRating(chat, index, el, msg.rating === 1 ? 0 : 1, null);
-  } else {
-    sendRating(chat, index, el, -1, msg.corrected || null);
-    openBetterAnswer(el, chat, index);
+  const choice = btn.dataset.rate;
+  if (choice === 'edit') editAnswer(el, chat, index);
+  else if (choice === 'keep') {
+    if (msg.corrected) return;                                   // an edited answer is already kept
+    sendRating(chat, index, el, msg.rating === 1 ? 0 : 1, null); // click again = undecided
+  } else if (choice === 'drop') {
+    sendRating(chat, index, el, msg.rating === -1 ? 0 : -1, null); // also removes your edit
   }
 });
 
@@ -2269,8 +2301,7 @@ function clearRatings() {
     for (const m of chat.messages) { delete m.rating; delete m.corrected; }
   }
   saveChats();
-  thread.querySelectorAll('.msg.assistant').forEach(showRating);
-  thread.querySelectorAll('.fix-box').forEach(b => b.remove());
+  renderThread();   // edited answers go back to kinSin's own words
 }
 
 // list: null = still loading
@@ -2351,7 +2382,7 @@ async function addMemory() {
 
 improveBox.addEventListener('change', async () => {
   const on = improveBox.checked;
-  if (!on && !confirm('Turn off “Help improve kinSin”?\n\nAll your 👍 / 👎 ratings and better answers will be deleted from the server.')) {
+  if (!on && !confirm('Turn off “Help improve kinSin”?\n\nYour saved answers, keeps and edits will be deleted from the server.')) {
     improveBox.checked = true;
     return;
   }
@@ -2375,6 +2406,20 @@ memoryInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preven
 document.getElementById('memory-close').addEventListener('click', () => closeCard(memoryOverlay));
 memoryOverlay.addEventListener('keydown', e => { if (e.key === 'Escape') { e.preventDefault(); closeCard(memoryOverlay); } });
 memoryOverlay.addEventListener('click', e => { if (e.target === memoryOverlay) closeCard(memoryOverlay); });
+
+// ---------- "Help improve kinSin": auto-save finished answers ----------
+// A finished answer is saved as "undecided". It's only used for training after you
+// ✅ keep it or ✏️ edit it under the answer. Errors are ignored: saving must never get in the way of chatting.
+function saveForTraining(chat, index) {
+  const msg = chat.messages[index];
+  if (!msg || msg.role !== 'assistant') return;
+  api('/v1/training/save', {
+    chat_id: chat.id,
+    index,
+    live: !!msg.sources?.length,
+    messages: trainingMessages(chat, index),
+  }).catch(err => { if (err.status === 401) loggedOutElsewhere(); });
+}
 
 // The bottom of the sidebar: who is using kinSin, with Log in / Log out
 function showUser() {
