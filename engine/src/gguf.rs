@@ -177,12 +177,10 @@ impl Gguf {
         let count: u64 = info.dims.iter().product();
 
         // 2. How many bytes it takes in the file
-        let size = match info.kind {
-            0 => count * 4,          // F32: 4 bytes per number
-            2 => count / 32 * 18,    // Q4_0: 18 bytes per 32 numbers
-            14 => count / 256 * 210, // Q6_K: 210 bytes per 256 numbers
-            other => anyhow::bail!("{name}: storage type {other} isn't supported yet"),
-        };
+        let (per_block, block_bytes) = crate::quant::block_info(info.kind).with_context(|| {
+            format!("{name}: storage type {} isn't supported yet", crate::quant::kind_name(info.kind))
+        })?;
+        let size = count / per_block as u64 * block_bytes as u64;
 
         // 3. Jump to its bytes and read them
         let mut file = std::fs::File::open(&self.path)?;
@@ -192,22 +190,17 @@ impl Gguf {
 
         // 4. Unpack
         let mut out = Vec::with_capacity(count as usize);
-        match info.kind {
-            0 => out.extend(bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))),
-            2 => crate::quant::dequantize_q4_0(&bytes, &mut out),
-            14 => crate::quant::dequantize_q6_k(&bytes, &mut out),
-            _ => unreachable!(),
-        }
+        crate::quant::dequantize(info.kind, &bytes, &mut out);
         Ok(out)
     }
 
-        /// A weight matrix, kept packed (4-bit stays 4-bit in memory).
+    /// A weight matrix, kept packed (4-bit stays 4-bit in memory).
     pub fn matrix(&self, name: &str) -> anyhow::Result<crate::quant::QMatrix> {
         let info = self.tensors.iter().find(|t| t.name == name).with_context(|| format!("no tensor called {name}"))?;
         let cols = info.dims[0] as usize; // GGUF lists the shape backwards: numbers per row first
         let rows: usize = info.dims[1..].iter().product::<u64>() as usize;
         let row_bytes = crate::quant::row_bytes(info.kind, cols)
-            .with_context(|| format!("{name}: storage type {} isn't supported yet", info.kind))?;
+            .with_context(|| format!("{name}: storage type {} isn't supported yet", crate::quant::kind_name(info.kind)))?;
         let mut file = std::fs::File::open(&self.path)?;
         file.seek(SeekFrom::Start(self.data_start + info.offset))?;
         let mut bytes = vec![0u8; rows * row_bytes];

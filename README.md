@@ -38,9 +38,9 @@ engine's answers against, and as an automatic fallback.
 | Part | What I wrote |
 |---|---|
 | **Model file** | A GGUF reader: header, metadata, tensor index, alignment |
-| **Weights** | Q4_0 and Q6_K unpacking, verified **bit-exact** against Candle on every tensor type |
+| **Weights** | 12 storage types unpacked by hand (F16, BF16, Q4_0/1, Q5_0/1, Q8_0, Q2_K–Q6_K), checked against llama.cpp's reference code with golden tests |
 | **Transformer** | RMSNorm, RoPE, grouped-query attention (12 query / 2 key-value heads), SwiGLU, KV cache, tied embeddings |
-| **Kernels** | Fused Q4_0 / Q6_K dot products, **AVX2 SIMD**, integer Q4_0 × Q8_0 maths (`maddubs`), a rayon thread pool |
+| **Kernels** | Fused dot products, **AVX2 SIMD**, integer maths against an 8-bit word (`maddubs`) for Q4_0, Q5_0, Q8_0 and Q4_K, a rayon thread pool |
 | **Prefill** | The whole prompt in one batch: each weight row is read once, with causal attention, and the output layer runs only for the last word |
 
 **Correctness:** `examples/compare_model.rs` runs both engines on the real model and checks that they
@@ -135,7 +135,7 @@ cd RustLLM
 ```
 
 **1. Get a model** into `models/`:
-- GGUF weights in **Q4_0**, e.g. `qwen2.5-1.5b-instruct-q4_0.gguf` from
+- Qwen2 GGUF weights, e.g. `qwen2.5-1.5b-instruct-q4_0.gguf` or `-q4_k_m.gguf` from
   [Qwen/Qwen2.5-1.5B-Instruct-GGUF](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF)
 - `tokenizer.json` from [Qwen/Qwen2.5-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct)
 
@@ -164,7 +164,7 @@ cargo run --release -p kinsin-engine --example chat -- models/qwen2.5-1.5b-instr
 |---|---|---|
 | `--model <path>` | | GGUF model file |
 | `--tokenizer <path>` | `models/tokenizer.json` | Tokenizer |
-| `--engine own\|candle` | `own` | My engine, or Candle. `own` falls back to Candle automatically for storage types it doesn't support yet |
+| `--engine own\|candle` | `own` | My engine, or Candle. `own` falls back to Candle only if a file uses a storage type it doesn't know (e.g. the IQ types) |
 | `--port <n>` | `8080` | HTTP port |
 | `--context <n>` | `4096` | Max conversation length in tokens |
 | `--db <path>` | `data/kinsin.db` | Accounts, chats, memory and feedback |
@@ -212,7 +212,7 @@ can't see.
 ```
 engine/                  kinsin-engine: my inference engine (no ML library)
   src/gguf.rs            reads the GGUF model file
-  src/quant.rs           Q4_0 / Q6_K / Q8_0 maths, AVX2 kernels, the packed QMatrix
+  src/quant.rs           unpacking for 12 storage types, integer + AVX2 kernels, the packed QMatrix
   src/ops.rs             RMSNorm, softmax, SiLU / SwiGLU, RoPE
   src/model.rs           the Qwen2 transformer: layers, attention, KV cache, batched prefill
   examples/chat.rs       chat with the engine in the terminal
@@ -237,7 +237,7 @@ examples/                compare_weights, compare_model, race, batch_bench
 cargo test --release
 ```
 
-The tests cover the engine's building blocks (f16, Q4_0, Q6_K, Q8_0, the SIMD versions against the
+The tests cover the engine's building blocks (every storage type against llama.cpp's reference, the SIMD versions against the
 plain ones, RMSNorm, softmax, RoPE's distance property), the HTTP API (streaming format, error cases,
 queue positions), accounts and sessions, fair-use limits, memory rules, dataset export, and Wikipedia
 lookups against a fake local server.
@@ -246,7 +246,9 @@ lookups against a fake local server.
 
 - **Speed:** one answer at a time, roughly 15–25 tok/s on my laptop depending on its power mode. Fine
   for a demo or a small group, not for thousands of simultaneous users.
-- **Formats:** my engine reads Q4_0, Q6_K and F32 weights. Other formats fall back to Candle.
+- **Formats:** my engine reads F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0 and Q2_K–Q6_K (so Q4_K_M and
+  Q5_K_M files work). Q4_0, Q5_0, Q8_0, Q4_K and Q6_K have fast kernels; the rest are correct but slower.
+  Only the rarer IQ formats fall back to Candle.
 - **Knowledge:** a 1.5B model makes mistakes. Wikipedia helps with facts but lacks the latest hours.
 - **Built on Qwen2.5:** the weights come from Alibaba's open model (Apache-2.0). The engine, server,
   app and fine-tuning are mine.
